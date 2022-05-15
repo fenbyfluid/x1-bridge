@@ -1,41 +1,131 @@
 #include <Arduino.h>
 #include <BLEDevice.h>
+#include <BLE2902.h>
+#include <BLE2904.h>
 #include <BluetoothSerial.h>
 
 BluetoothSerial SerialBT;
 
+BLECharacteristic *g_pBatteryVoltageCharacteristic;
+BLECharacteristic *g_pBatteryLevelCharacteristic;
+
+// TODO: There is a fair amount of complexity around supporting multiple connections.
+//       We don't currently need that, but it does need validating that we're being sane.
+//
+//       Current expectation:
+//           BLEServer stops advertising when a client connects. If we wanted multiple
+//           we'd need to re-start advertising onConnect. We currently re-start in
+//           onDisconnect instead - need to ensure no one can sneak by that and connect
+//           anyway.
+//
+//       Known pain points:
+//           BLE2902's state needs to be per-connection - or the enabled state for
+//           notifications will be shared by all peers. We should be able to add our
+//           own callbacks and copy the right state in/out there.
 class MyBleServerCallbacks: public BLEServerCallbacks {
+  virtual void onConnect(BLEServer *pServer) override {
+    Serial.println("ble device connected");
+  }
+
   void onDisconnect(BLEServer *pServer) override {
+    Serial.println("ble device disconnected");
+
+    // Reset the notifications / indications preference.
+    auto clientConfig = (BLE2902 *)g_pBatteryLevelCharacteristic->getDescriptorByUUID(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_CLIENT_CONFIG));
+    clientConfig->setNotifications(false);
+    clientConfig->setIndications(false);
+
     // We have to restart advertising each time a client disconnects.
     pServer->getAdvertising()->start();
   }
 } g_BleServerCallbacks;
 
+// TODO: We're not using this to provide the value any more, just left as an example for now.
 class MyBatteryBleCharacteristicCallbacks: public BLECharacteristicCallbacks {
   void onRead(BLECharacteristic *pCharacteristic, esp_ble_gatts_cb_param_t *param) override {
-    uint32_t batteryMv = analogReadMilliVolts(A13) * 2;
-    pCharacteristic->setValue(batteryMv);
+    Serial.printf("reading ble characteristic: %s\n", pCharacteristic->toString().c_str());
 
-    // 4234 (mostly 4232) appears to be our actual max
-    // 3218 seems to be the minimum seen when re-connecting usb after death
-    // seeing as low as 3016 via ble after disconnecting again
-    // got stuck at 3.9v charge after discharge test - needed a cold reboot
-    float batteryPct = ((batteryMv - 3000) / (4200.0 - 3000.0)) * 100;
-    Serial.printf("battery: %dmV %.02f%%\n", batteryMv, batteryPct);
+    // pCharacteristic->setValue(...);
   }
 } g_BatteryBleCharacteristicCallbacks;
-
-BLECharacteristic *g_pBatteryVoltageCharacteristic;
 
 void setup()
 {
   Serial.begin(115200);
-  Serial.println("Hello, World!");
 
-  // initialize LED digital pin as an output.
+  // When deploying from macOS, we're late to connect.
+  delay(5 * 1000);
+
+  // Initialize LED digital pin as an output.
   pinMode(LED_BUILTIN, OUTPUT);
 
+  xTaskCreateUniversal([](void *pvParameters) {
+    for (;;) {
+      // Turn the LED on (HIGH is the voltage level)
+      digitalWrite(LED_BUILTIN, HIGH);
+
+      delay(3 * 1000);
+
+      // Turn the LED off by making the voltage LOW
+      digitalWrite(LED_BUILTIN, LOW);
+
+      delay(50);
+    }
+  }, "ledBlink", getArduinoLoopTaskStackSize(), NULL, 1, NULL, ARDUINO_RUNNING_CORE);
+
+  xTaskCreateUniversal([](void *pvParameters) {
+    for (;;) {
+      uint32_t batteryMv = analogReadMilliVolts(A13) * 2;
+
+      if (g_pBatteryVoltageCharacteristic) {
+        g_pBatteryVoltageCharacteristic->setValue(batteryMv);
+      }
+
+      // 4234 (mostly 4232) appears to be our actual max
+      // 3218 seems to be the minimum seen when re-connecting usb after death
+      // seeing as low as 3016 via ble after disconnecting again
+      // got stuck at 3.9v charge after discharge test - needed a cold reboot
+      float batteryPct = (((int32_t)batteryMv - 3200) / (4200.0 - 3200.0)) * 100;
+      Serial.printf("battery (task): %dmV %.02f%%\n", batteryMv, batteryPct);
+
+      if (g_pBatteryLevelCharacteristic) {
+        uint8_t batteryLevel = constrain((int32_t)batteryPct, 0, 100);
+        g_pBatteryLevelCharacteristic->setValue(&batteryLevel, 1);
+
+        // TODO: Should we only notify when the value has actually changed?
+        g_pBatteryLevelCharacteristic->notify();
+      }
+
+      // TODO: Tune the cutoff values.
+      if (batteryMv < 3200) {
+        // Gracefully clean up.
+        SerialBT.end();
+        BLEDevice::deinit(true);
+
+        delay(5 * 1000);
+
+        // TODO: We shouldn't need to do this - outputs have to be explicitly preserved during deep sleep.
+        digitalWrite(LED_BUILTIN, LOW);
+
+        if (batteryMv >= 3000) {
+          // Initial safety cut off - wake up again after 10 minutes.
+          // Otherwise we'll need a physical reset.
+          esp_sleep_enable_timer_wakeup(10 * 60 * 1000000);
+        }
+
+        esp_deep_sleep_start();
+      }
+
+      // TODO: We probably don't need to run this very often at all.
+      delay(10 * 1000);
+    }
+  }, "batteryMonitor", getArduinoLoopTaskStackSize(), NULL, 1, NULL, ARDUINO_RUNNING_CORE);
+
+  // Sleep for another second to ensure the battery monitor has had a chance to run before we power up fully.
+  delay(1000);
+
   BLEDevice::init("X1 Bridge");
+  // BLEDevice::setPower(ESP_PWR_LVL_P9);
 
   BLEServer *pServer = BLEDevice::createServer();
   pServer->setCallbacks(&g_BleServerCallbacks);
@@ -47,11 +137,40 @@ void setup()
   g_pBatteryVoltageCharacteristic = pService->createCharacteristic("763dcccd-2473-43ec-92a0-ccf695f0e4cc", BLECharacteristic::PROPERTY_READ);
   g_pBatteryVoltageCharacteristic->setCallbacks(&g_BatteryBleCharacteristicCallbacks);
 
+  BLEDescriptor *batteryVoltageDescriptionDescriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+  batteryVoltageDescriptionDescriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+  batteryVoltageDescriptionDescriptor->setValue("Battery Voltage (mV)");
+  g_pBatteryVoltageCharacteristic->addDescriptor(batteryVoltageDescriptionDescriptor);
+
+  BLE2904 *batteryVoltagePresentationDescriptor = new BLE2904();
+  batteryVoltagePresentationDescriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+  batteryVoltagePresentationDescriptor->setFormat(BLE2904::FORMAT_UINT32);
+  batteryVoltagePresentationDescriptor->setExponent(-3);
+  batteryVoltagePresentationDescriptor->setNamespace(1);
+  batteryVoltagePresentationDescriptor->setUnit(0x2728); // volts
+  batteryVoltagePresentationDescriptor->setDescription(0);
+  g_pBatteryVoltageCharacteristic->addDescriptor(batteryVoltagePresentationDescriptor);
+
   pService->start();
 
+  BLEService *pBatteryService = pServer->createService(BLEUUID((uint16_t)ESP_GATT_UUID_BATTERY_SERVICE_SVC));
+
+  g_pBatteryLevelCharacteristic = pBatteryService->createCharacteristic(BLEUUID((uint16_t)ESP_GATT_UUID_BATTERY_LEVEL), BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  g_pBatteryLevelCharacteristic->setCallbacks(&g_BatteryBleCharacteristicCallbacks);
+
+  BLE2902 *batteryLevelClientCharacteristicConfigurationDescriptor = new BLE2902();
+  g_pBatteryLevelCharacteristic->addDescriptor(batteryLevelClientCharacteristicConfigurationDescriptor);
+
+  pBatteryService->start();
+
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  // We probably only want to advertise our custom service for discovery.
   pAdvertising->addServiceUUID(serviceUuid);
+  // This service gets doubled-up in the advertising data if we include it. It seems harmless though.
+  // pAdvertising->addServiceUUID(BLEUUID((uint16_t)ESP_GATT_UUID_BATTERY_SERVICE_SVC));
   pAdvertising->start();
+
+  // return;
 
   SerialBT.begin("X1 Bridge", true);
 
@@ -114,7 +233,7 @@ void setup()
   SerialBT.write(getInfoCommand, sizeof(getInfoCommand));
 
   // Wait for the responses to have arrived.
-  delay(10 * 1000);
+  delay(5 * 1000);
 
   Serial.println("disconnecting...");
   SerialBT.disconnect();
@@ -122,15 +241,8 @@ void setup()
 
 void loop()
 {
-  // turn the LED on (HIGH is the voltage level)
-  digitalWrite(LED_BUILTIN, HIGH);
-
-  // wait for a second
-  delay(1000);
-
-  // turn the LED off by making the voltage LOW
-  digitalWrite(LED_BUILTIN, LOW);
-  
-   // wait for a second
+  // Just sleep in the loop, all the work is done by tasks.
+  // We don't want to just return as that'll waste CPU, but we need to wakeup
+  // periodically so that the Arduino core can handle serial events (I think?)
   delay(1000);
 }
