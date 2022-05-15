@@ -31,9 +31,13 @@ class MyBleServerCallbacks: public BLEServerCallbacks {
     Serial.println("ble device disconnected");
 
     // Reset the notifications / indications preference.
-    auto clientConfig = (BLE2902 *)g_pBatteryLevelCharacteristic->getDescriptorByUUID(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_CLIENT_CONFIG));
-    clientConfig->setNotifications(false);
-    clientConfig->setIndications(false);
+    auto batteryVoltageClientConfig = (BLE2902 *)g_pBatteryVoltageCharacteristic->getDescriptorByUUID(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_CLIENT_CONFIG));
+    batteryVoltageClientConfig->setNotifications(false);
+    batteryVoltageClientConfig->setIndications(false);
+
+    auto batteryLevelClientConfig = (BLE2902 *)g_pBatteryLevelCharacteristic->getDescriptorByUUID(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_CLIENT_CONFIG));
+    batteryLevelClientConfig->setNotifications(false);
+    batteryLevelClientConfig->setIndications(false);
 
     // We have to restart advertising each time a client disconnects.
     pServer->getAdvertising()->start();
@@ -64,12 +68,12 @@ void setup()
       // Turn the LED on (HIGH is the voltage level)
       digitalWrite(LED_BUILTIN, HIGH);
 
-      delay(3 * 1000);
+      delay(100);
 
       // Turn the LED off by making the voltage LOW
       digitalWrite(LED_BUILTIN, LOW);
 
-      delay(50);
+      delay(2 * 1000);
     }
   }, "ledBlink", getArduinoLoopTaskStackSize(), NULL, 1, NULL, ARDUINO_RUNNING_CORE);
 
@@ -79,6 +83,7 @@ void setup()
 
       if (g_pBatteryVoltageCharacteristic) {
         g_pBatteryVoltageCharacteristic->setValue(batteryMv);
+        g_pBatteryVoltageCharacteristic->notify();
       }
 
       // 4234 (mostly 4232) appears to be our actual max
@@ -117,7 +122,7 @@ void setup()
       }
 
       // TODO: We probably don't need to run this very often at all.
-      delay(10 * 1000);
+      delay(60 * 1000);
     }
   }, "batteryMonitor", getArduinoLoopTaskStackSize(), NULL, 1, NULL, ARDUINO_RUNNING_CORE);
 
@@ -127,20 +132,54 @@ void setup()
   BLEDevice::init("X1 Bridge");
   // BLEDevice::setPower(ESP_PWR_LVL_P9);
 
+  // Calling this appears to require auth immediately, instead of when reading a protected characteristic.
+  // BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_MITM);
+
+  // We use this as setSecurityCallbacks appears to opt in to a bunch of behaviour we don't want.
+  // TODO: It's possible all the extra bits are events that are never called with our config though.
+  BLEDevice::setCustomGapHandler([](esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+    if (event != ESP_GAP_BLE_AUTH_CMPL_EVT) {
+      return;
+    }
+
+    auto ev_param = param->ble_security.auth_cmpl;
+    if (ev_param.success) {
+      Serial.println("ble connection authorized");
+      return;
+    }
+
+    // 81 bad pin
+    // 85 cancel
+    Serial.printf("ble connection auth failed, reason: %d\n", ev_param.fail_reason);
+
+    // TODO: Can / should we kick off the peer?
+  });
+
+  BLESecurity *pSecurity = new BLESecurity();
+  // TODO: Get from config.
+  pSecurity->setStaticPIN(123456);
+  // TODO: Allow bonding?
+  pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM);
+
   BLEServer *pServer = BLEDevice::createServer();
   pServer->setCallbacks(&g_BleServerCallbacks);
 
   const char *serviceUuid = "7c75bd31-7858-48fb-b797-8613e960da6a";
-
   BLEService *pService = pServer->createService(serviceUuid);
 
-  g_pBatteryVoltageCharacteristic = pService->createCharacteristic("763dcccd-2473-43ec-92a0-ccf695f0e4cc", BLECharacteristic::PROPERTY_READ);
+  g_pBatteryVoltageCharacteristic = pService->createCharacteristic("763dcccd-2473-43ec-92a0-ccf695f0e4cc", BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   g_pBatteryVoltageCharacteristic->setCallbacks(&g_BatteryBleCharacteristicCallbacks);
+  g_pBatteryVoltageCharacteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM);
 
   BLEDescriptor *batteryVoltageDescriptionDescriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
   batteryVoltageDescriptionDescriptor->setAccessPermissions(ESP_GATT_PERM_READ);
   batteryVoltageDescriptionDescriptor->setValue("Battery Voltage (mV)");
   g_pBatteryVoltageCharacteristic->addDescriptor(batteryVoltageDescriptionDescriptor);
+
+  // We're not really interested in notify support for this one, but it's a useful example for a protected characteristic for now.
+  BLE2902 *batteryVoltageClientCharacteristicConfigurationDescriptor = new BLE2902();
+  batteryVoltageClientCharacteristicConfigurationDescriptor->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE_ENC_MITM);
+  g_pBatteryVoltageCharacteristic->addDescriptor(batteryVoltageClientCharacteristicConfigurationDescriptor);
 
   BLE2904 *batteryVoltagePresentationDescriptor = new BLE2904();
   batteryVoltagePresentationDescriptor->setAccessPermissions(ESP_GATT_PERM_READ);
@@ -159,6 +198,7 @@ void setup()
   g_pBatteryLevelCharacteristic->setCallbacks(&g_BatteryBleCharacteristicCallbacks);
 
   BLE2902 *batteryLevelClientCharacteristicConfigurationDescriptor = new BLE2902();
+  batteryVoltagePresentationDescriptor->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
   g_pBatteryLevelCharacteristic->addDescriptor(batteryLevelClientCharacteristicConfigurationDescriptor);
 
   pBatteryService->start();
@@ -244,5 +284,8 @@ void loop()
   // Just sleep in the loop, all the work is done by tasks.
   // We don't want to just return as that'll waste CPU, but we need to wakeup
   // periodically so that the Arduino core can handle serial events (I think?)
-  delay(1000);
+  // delay(1000);
+
+  // We don't need the `serialEvent` callback, so just end the loop task.
+  vTaskDelete(NULL);
 }
