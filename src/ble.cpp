@@ -59,6 +59,7 @@ static class MyBleServerCallbacks: public BLEServerCallbacks {
 
         // TODO: It may be worthwhile to add an application-level heartbeat so that
         //       we can forcibly disconnect peers that aren't doing anything.
+        // TODO: How *do* we disconnect a peer?
     }
 
     void onDisconnect(BLEServer *server) override {
@@ -165,12 +166,16 @@ void Ble::initBatteryService(BLEServer *server) {
 void Ble::initBridgeService(BLEServer *server) {
     // Enough handles need to be allocated for the characteristics and their descriptions.
     // If there aren't enough, things will start disappearing when querying the service.
+    // Need approximately (2 * number of characteristics) + number of descriptors
     // TODO: Is failure indicated to the ESP_GATTS_ADD_CHAR_EVT event?
-    BLEService *service = server->createService(BLEUUID(X1_GATT_UUID_BRIDGE_SVC), 30);
+    BLEService *service = server->createService(BLEUUID(X1_GATT_UUID_BRIDGE_SVC), 50);
 
     createSerialDataCharacteristic(service);
     createBluetoothScanCharacteristic(service);
     createBluetoothConnectCharacteristic(service);
+    createConfigNameCharacteristic(service);
+    createConfigPinCodeCharacteristic(service);
+    createConfigBluetoothAddressCharacteristic(service);
     battery_voltage = createBatteryVoltageCharacteristic(service);
     createDebugLogCharacteristic(service);
     createRestartCharacteristic(service);
@@ -265,7 +270,10 @@ BLECharacteristic *Ble::createBluetoothScanCharacteristic(BLEService *service) {
                 return;
             }
 
-            if (data[0] == 0) {
+            bool cancel_scan = (data[0] == 0);
+            Log::printf("ble client %s bt scan", cancel_scan ? "canceled" : "requested");
+
+            if (cancel_scan) {
                 Bluetooth::cancelScan();
                 return;
             }
@@ -382,13 +390,150 @@ BLECharacteristic *Ble::createBluetoothConnectCharacteristic(BLEService *service
     return characteristic;
 }
 
+BLECharacteristic *Ble::createConfigNameCharacteristic(BLEService *service) {
+    class Callbacks: public BLECharacteristicCallbacks {
+        void onRead(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            auto name = Config::getName();
+            characteristic->setValue(name);
+        }
+
+        void onWrite(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            auto name = characteristic->getValue();
+            Config::setName(name);
+
+            Log::printf("changed name to \"%s\"\n", name.c_str());
+        }
+    };
+
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_CONFIG_NAME, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    characteristic->setCallbacks(new Callbacks());
+    characteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM);
+
+    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    description_descriptor->setValue("Name");
+    characteristic->addDescriptor(description_descriptor);
+
+    BLE2904 *presentation_descriptor = new BLE2904();
+    presentation_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    presentation_descriptor->setFormat(BLE2904::FORMAT_UTF8);
+    presentation_descriptor->setExponent(0);
+    presentation_descriptor->setNamespace(1);
+    presentation_descriptor->setUnit(0x2700); // unitless
+    presentation_descriptor->setDescription(0);
+    characteristic->addDescriptor(presentation_descriptor);
+
+    return characteristic;
+}
+
+BLECharacteristic *Ble::createConfigPinCodeCharacteristic(BLEService *service) {
+    class Callbacks: public BLECharacteristicCallbacks {
+        void onWrite(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint8_t *data = characteristic->getData();
+            size_t length = characteristic->getLength();
+
+            if (length != 4) {
+                Log::printf("attempt to set pin code had wrong value length (%d != %d)\n", length, 4);
+                return;
+            }
+
+            uint32_t pin_code = (data[3] << 24) | (data[2] << 16) | (data[1] << 8) | data[0];
+            if (pin_code > 999999) {
+                Log::printf("attempt to set pin code out of bounds: %d\n", pin_code);
+                return;
+            }
+
+            Config::setPinCode(pin_code);
+
+            Log::printf("changed pin code to %06d\n", pin_code);
+        }
+    };
+
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_CONFIG_PIN_CODE, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    characteristic->setCallbacks(new Callbacks());
+    characteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM);
+
+    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    description_descriptor->setValue("Pin Code");
+    characteristic->addDescriptor(description_descriptor);
+
+    BLE2904 *presentation_descriptor = new BLE2904();
+    presentation_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    presentation_descriptor->setFormat(BLE2904::FORMAT_UINT32);
+    presentation_descriptor->setExponent(0);
+    presentation_descriptor->setNamespace(1);
+    presentation_descriptor->setUnit(0x2700); // unitless
+    presentation_descriptor->setDescription(0);
+    characteristic->addDescriptor(presentation_descriptor);
+
+    return characteristic;
+}
+
+BLECharacteristic *Ble::createConfigBluetoothAddressCharacteristic(BLEService *service) {
+    class Callbacks: public BLECharacteristicCallbacks {
+        void onRead(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            auto address = Config::getBtAddress();
+            if (address) {
+                characteristic->setValue(address->data(), address->size());
+            } else {
+                characteristic->setValue(nullptr, 0);
+            }
+        }
+
+        void onWrite(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint8_t *data = characteristic->getData();
+            size_t length = characteristic->getLength();
+
+            if (length == 0) {
+                Config::setBtAddress(std::nullopt);
+
+                Log::print("cleared bt addr\n");
+                return;
+            }
+
+            if (length != 6) {
+                Log::printf("attempt to set bt addr had wrong value length (%d != %d)\n", length, 6);
+                return;
+            }
+
+            std::array<uint8_t, 6> address;
+            std::copy(data, data + length, address.begin());
+            Config::setBtAddress(std::make_optional(address));
+
+            Log::printf("changed bt addr to %02X:%02X:%02X:%02X:%02X:%02X\n",
+                address[0], address[1], address[2], address[3], address[4], address[5]);
+        }
+    };
+
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_CONFIG_BT_ADDR, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    characteristic->setCallbacks(new Callbacks());
+    characteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM);
+
+    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    description_descriptor->setValue("Bluetooth Address");
+    characteristic->addDescriptor(description_descriptor);
+
+    BLE2904 *presentation_descriptor = new BLE2904();
+    presentation_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    presentation_descriptor->setFormat(BLE2904::FORMAT_UINT48);
+    presentation_descriptor->setExponent(0);
+    presentation_descriptor->setNamespace(1);
+    presentation_descriptor->setUnit(0x2700); // unitless
+    presentation_descriptor->setDescription(0);
+    characteristic->addDescriptor(presentation_descriptor);
+
+    return characteristic;
+}
+
 BLECharacteristic *Ble::createBatteryVoltageCharacteristic(BLEService *service) {
     BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_BATTERY_VOLTAGE, BLECharacteristic::PROPERTY_READ);
     characteristic->setAccessPermissions(ESP_GATT_PERM_READ);
 
     BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
     description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
-    description_descriptor->setValue("Battery Voltage (mV)");
+    description_descriptor->setValue("Battery Voltage");
     characteristic->addDescriptor(description_descriptor);
 
     BLE2904 *presentation_descriptor = new BLE2904();
@@ -432,6 +577,8 @@ BLECharacteristic *Ble::createRestartCharacteristic(BLEService *service) {
             size_t length = characteristic->getLength();
 
             bool erase_config = (length >= 1) && data[0] != 0;
+            Log::printf("reboot request from ble client (%s config reset)\n", erase_config ? "with" : "without");
+
             if (erase_config) {
                 Config::reset();
 
@@ -517,7 +664,7 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
                 return;
             }
 
-            image_size = (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4];
+            image_size = (data[4] << 24) | (data[3] << 16) | (data[2] << 8) | data[1];
 
             esp_err_t err = esp_ota_begin(ota_partition, image_size, &ota_handle);
             if (err != ESP_OK) {

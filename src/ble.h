@@ -61,6 +61,9 @@ private:
     static BLECharacteristic *createSerialDataCharacteristic(BLEService *service);
     static BLECharacteristic *createBluetoothScanCharacteristic(BLEService *service);
     static BLECharacteristic *createBluetoothConnectCharacteristic(BLEService *service);
+    static BLECharacteristic *createConfigNameCharacteristic(BLEService *service);
+    static BLECharacteristic *createConfigPinCodeCharacteristic(BLEService *service);
+    static BLECharacteristic *createConfigBluetoothAddressCharacteristic(BLEService *service);
     static BLECharacteristic *createBatteryVoltageCharacteristic(BLEService *service);
     static BLECharacteristic *createDebugLogCharacteristic(BLEService *service);
     static BLECharacteristic *createRestartCharacteristic(BLEService *service);

@@ -70,7 +70,7 @@ async def main():
             file.seek(0, io.SEEK_SET)
 
             await client.write_gatt_char(
-                CHAR_UUID, struct.pack("!BBI", 1, 1, size), True
+                CHAR_UUID, struct.pack("<BBI", 1, 1, size), True
             )
 
             sha256 = hashlib.sha256()
@@ -83,7 +83,7 @@ async def main():
                     return
 
                 await client.write_gatt_char(
-                    CHAR_UUID, struct.pack("!B", 2) + chunk, True
+                    CHAR_UUID, struct.pack("<B", 2) + chunk, True
                 )
                 done += len(chunk)
                 print("{0} / {1} ({2:.2f}%)".format(done, size, (done / size) * 100))
@@ -99,7 +99,7 @@ async def main():
             print("signature: {0}".format(signature.hex()))
 
             await client.write_gatt_char(
-                CHAR_UUID, struct.pack("!B", 3) + signature, True
+                CHAR_UUID, struct.pack("<B", 3) + signature, True
             )
 
             await event.wait()

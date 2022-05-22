@@ -99,9 +99,12 @@ void setup() {
 
     startLedBlinkTask();
 
-    // The name is shared internally in the BT stack, so must be the same for both.
     std::string name = Config::getName();
-    Ble::init(name, Config::getPinCode());
+    uint32_t pin_code = Config::getPinCode();
+    Log::printf("name: \"%s\", pin code: %06d\n", name.c_str(), pin_code);
+
+    // The name is shared internally in the BT stack, so must be the same for both.
+    Ble::init(name, pin_code);
     Bluetooth::init(name);
 
     // Run battery monitor again now BLE is up to populate the battery level characteristic.
