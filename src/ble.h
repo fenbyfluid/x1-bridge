@@ -11,7 +11,7 @@
 #define X1_GATT_UUID_CONFIG_PIN_CODE    "00002005-7858-48fb-b797-8613e960da6a"
 #define X1_GATT_UUID_CONFIG_X1_BT_ADDR  "00002006-7858-48fb-b797-8613e960da6a"
 #define X1_GATT_UUID_DEBUG_LOG          "00002007-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_RESET              "00002008-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_RESTART            "00002008-7858-48fb-b797-8613e960da6a"
 #define X1_GATT_UUID_OTA_UPDATE         "00002009-7858-48fb-b797-8613e960da6a"
 
 // BLE API:
@@ -28,18 +28,18 @@
 //     - Write: connect / disconnect
 //
 //   X1_GATT_UUID_CONFIG_DEVICE_NAME
-//     - Read / Write: string tied to config, reset required
+//     - Read / Write: string tied to config, restart required
 //   X1_GATT_UUID_CONFIG_PIN_CODE
-//     - Write: u32 tied to config, reset required
+//     - Write: u32 tied to config, restart required
 //   X1_GATT_UUID_CONFIG_X1_BT_ADDR
-//     - Read / Write: u8[6] tied to config, reset required if already set
+//     - Read / Write: u8[6] tied to config, restart required if already set
 //
 //   X1_GATT_UUID_BATTERY_VOLTAGE
 //     - Read: current battery voltage
 //   X1_GATT_UUID_DEBUG_LOG
 //     - Notify: log write
-//   X1_GATT_UUID_RESET
-//     - Write: reset module, param to erase config first
+//   X1_GATT_UUID_RESTART
+//     - Write: restart module, param to erase config first
 //   X1_GATT_UUID_OTA_UPDATE
 //     - Write: ota update message
 //     - Notify: ota update status
@@ -59,6 +59,8 @@ private:
     static void initBatteryService(BLEServer *server);
     static void initBridgeService(BLEServer *server);
     static BLECharacteristic *createSerialDataCharacteristic(BLEService *service);
-    static BLECharacteristic *createOtaUpdateCharacteristic(BLEService *service);
     static BLECharacteristic *createBatteryVoltageCharacteristic(BLEService *service);
+    static BLECharacteristic *createDebugLogCharacteristic(BLEService *service);
+    static BLECharacteristic *createRestartCharacteristic(BLEService *service);
+    static BLECharacteristic *createOtaUpdateCharacteristic(BLEService *service);
 };

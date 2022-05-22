@@ -3,6 +3,7 @@
 #include "log.h"
 #include "bluetooth.h"
 #include "defaults.h"
+#include "config.h"
 
 #include <BLEDevice.h>
 #include <BLE2902.h>
@@ -12,6 +13,20 @@
 #include <mbedtls/sha256.h>
 #include <mbedtls/ecdsa.h>
 #include <mbedtls/error.h>
+
+static void gracefulRestart() {
+    xTaskCreatePinnedToCore([](void *) {
+        vTaskDelay((1 * 1000) / portTICK_PERIOD_MS);
+
+        // Gracefully clean up.
+        Bluetooth::deinit();
+        Ble::deinit();
+        vTaskDelay((5 * 1000) / portTICK_PERIOD_MS);
+
+        Log::print("cleanup complete, restarting\n");
+        esp_restart();
+    }, "restart", CONFIG_ESP_MAIN_TASK_STACK_SIZE, nullptr, 1, nullptr, CONFIG_ARDUINO_RUNNING_CORE);
+}
 
 static bool is_client_connected = false;
 static std::vector<BLE2902 *> client_config_descriptors;
@@ -148,11 +163,15 @@ void Ble::initBatteryService(BLEServer *server) {
 }
 
 void Ble::initBridgeService(BLEServer *server) {
-    BLEService *service = server->createService(X1_GATT_UUID_BRIDGE_SVC);
+    // Enough handles need to be allocated for the characteristics and their descriptions.
+    // If there aren't enough, things will start disappearing when querying the service.
+    BLEService *service = server->createService(BLEUUID(X1_GATT_UUID_BRIDGE_SVC), 30);
 
     createSerialDataCharacteristic(service);
-    createOtaUpdateCharacteristic(service);
     battery_voltage = createBatteryVoltageCharacteristic(service);
+    createDebugLogCharacteristic(service);
+    createRestartCharacteristic(service);
+    createOtaUpdateCharacteristic(service);
 
     service->start();
 }
@@ -218,6 +237,78 @@ BLECharacteristic *Ble::createSerialDataCharacteristic(BLEService *service) {
             buffer.clear();
         }
     });
+
+    return characteristic;
+}
+
+BLECharacteristic *Ble::createBatteryVoltageCharacteristic(BLEService *service) {
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_BATTERY_VOLTAGE, BLECharacteristic::PROPERTY_READ);
+    characteristic->setAccessPermissions(ESP_GATT_PERM_READ);
+
+    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    description_descriptor->setValue("Battery Voltage (mV)");
+    characteristic->addDescriptor(description_descriptor);
+
+    BLE2904 *presentation_descriptor = new BLE2904();
+    presentation_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    presentation_descriptor->setFormat(BLE2904::FORMAT_UINT32);
+    presentation_descriptor->setExponent(-3);
+    presentation_descriptor->setNamespace(1);
+    presentation_descriptor->setUnit(0x2728); // volts
+    presentation_descriptor->setDescription(0);
+    characteristic->addDescriptor(presentation_descriptor);
+
+    return characteristic;
+}
+
+BLECharacteristic *Ble::createDebugLogCharacteristic(BLEService *service) {
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_DEBUG_LOG, BLECharacteristic::PROPERTY_NOTIFY);
+    characteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM);
+
+    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    description_descriptor->setValue("Debug Log");
+    characteristic->addDescriptor(description_descriptor);
+
+    BLE2902 *configuration_descriptor = new BLE2902();
+    configuration_descriptor->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE_ENC_MITM);
+    client_config_descriptors.push_back(configuration_descriptor);
+    characteristic->addDescriptor(configuration_descriptor);
+
+    Log::setOutputCallback([=](const char *message) {
+        characteristic->setValue(message);
+        characteristic->notify();
+    });
+
+    return characteristic;
+}
+
+BLECharacteristic *Ble::createRestartCharacteristic(BLEService *service) {
+    class Callbacks: public BLECharacteristicCallbacks {
+        void onWrite(BLECharacteristic *pCharacteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint8_t *data = pCharacteristic->getData();
+            size_t length = pCharacteristic->getLength();
+
+            bool erase_config = (length >= 1) && data[0] != 0;
+            if (erase_config) {
+                Config::reset();
+
+                Log::print("config reset\n");
+            }
+
+            gracefulRestart();
+        }
+    };
+
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_RESTART, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    characteristic->setCallbacks(new Callbacks());
+    characteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM);
+
+    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    description_descriptor->setValue("Restart");
+    characteristic->addDescriptor(description_descriptor);
 
     return characteristic;
 }
@@ -441,17 +532,7 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
 
             // We're in the BLE handler task here. We can't suspend it.
             // TODO: We should probably move more of the update process out.
-            xTaskCreatePinnedToCore([](void *) {
-                vTaskDelay((1 * 1000) / portTICK_PERIOD_MS);
-
-                // Gracefully clean up.
-                Bluetooth::deinit();
-                Ble::deinit();
-                vTaskDelay((5 * 1000) / portTICK_PERIOD_MS);
-
-                Log::print("cleanup complete, restarting\n");
-                esp_restart();
-            }, "restart", CONFIG_ESP_MAIN_TASK_STACK_SIZE, nullptr, 1, nullptr, CONFIG_ARDUINO_RUNNING_CORE);
+            gracefulRestart();
         }
 
         void notify(bool success) {
@@ -489,25 +570,4 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
 
     return nullptr;
 #endif
-}
-
-BLECharacteristic *Ble::createBatteryVoltageCharacteristic(BLEService *service) {
-    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_BATTERY_VOLTAGE, BLECharacteristic::PROPERTY_READ);
-    characteristic->setAccessPermissions(ESP_GATT_PERM_READ);
-
-    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
-    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
-    description_descriptor->setValue("Battery Voltage (mV)");
-    characteristic->addDescriptor(description_descriptor);
-
-    BLE2904 *presentation_descriptor = new BLE2904();
-    presentation_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
-    presentation_descriptor->setFormat(BLE2904::FORMAT_UINT32);
-    presentation_descriptor->setExponent(-3);
-    presentation_descriptor->setNamespace(1);
-    presentation_descriptor->setUnit(0x2728); // volts
-    presentation_descriptor->setDescription(0);
-    characteristic->addDescriptor(presentation_descriptor);
-
-    return characteristic;
 }
