@@ -107,73 +107,7 @@ void setup() {
     // Run battery monitor again now BLE is up to populate the battery level characteristic.
     checkBatteryLevel();
 
-#if 1
-    Log::print("about to scan ...\n");
-
-    TaskHandle_t task = xTaskGetCurrentTaskHandle();
-
-    Bluetooth::scan([](const AdvertisedDevice &advertisedDevice) {
-        // TODO: Filter to X1 devices using COD (0x1F00) and name prefix (SLMK1).
-        //       Name: SLMK1xxxx, Address: 00:06:66:xx:xx:xx, cod: 7936, rssi: -60
-        std::string name = advertisedDevice.name ? advertisedDevice.name->c_str() : "";
-        Log::printf("new bt device: %s\n", !name.empty() ? name.c_str() : "-unset-");
-
-        std::string prefix = "SLMK1";
-        if (name.compare(0, prefix.size(), prefix) != 0) {
-            return;
-        }
-
-        // TODO:
-        Config::setBtAddress(std::make_optional(advertisedDevice.address));
-        Bluetooth::cancelScan();
-
-        Log::print("device found, scan canceled\n");
-    }, [=]() {
-        Log::print("bluetooth discovery completed\n");
-
-        xTaskNotifyGive(task);
-    });
-
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-    Log::print("... scan complete\n");
-
-    auto bluetoothMac = Config::getBtAddress();
-    if (!bluetoothMac) {
-        Log::print("x1 bt addr not set, not connecting\n");
-        return;
-    }
-
-    Log::print("connecting...\n");
-
-    bool connected = Bluetooth::connect(*bluetoothMac, [](bool connected) {
-        if (connected) {
-            Log::print("bluetooth connected\n");
-        } else {
-            Log::print("bluetooth disconnected\n");
-        }
-    });
-
-    if (!connected) {
-        Log::print("connecting timed out\n");
-        return;
-    }
-
-    Log::print("connected\n");
-
-    // Get Firmware Version
-    Bluetooth::write({ 0x47, 0x73, 0x0A });
-
-    // Get Info
-    Bluetooth::write({ 0x47, 0x30, 0x0A });
-
-    // Wait for the responses to have arrived.
-    delay(5 * 1000);
-
-    Log::print("disconnecting...\n");
-    Bluetooth::disconnect();
-    Log::print("... disconnected\n");
-#endif
+    Log::print("ready\n");
 }
 
 void loop() {

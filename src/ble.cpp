@@ -165,9 +165,12 @@ void Ble::initBatteryService(BLEServer *server) {
 void Ble::initBridgeService(BLEServer *server) {
     // Enough handles need to be allocated for the characteristics and their descriptions.
     // If there aren't enough, things will start disappearing when querying the service.
+    // TODO: Is failure indicated to the ESP_GATTS_ADD_CHAR_EVT event?
     BLEService *service = server->createService(BLEUUID(X1_GATT_UUID_BRIDGE_SVC), 30);
 
     createSerialDataCharacteristic(service);
+    createBluetoothScanCharacteristic(service);
+    createBluetoothConnectCharacteristic(service);
     battery_voltage = createBatteryVoltageCharacteristic(service);
     createDebugLogCharacteristic(service);
     createRestartCharacteristic(service);
@@ -178,9 +181,9 @@ void Ble::initBridgeService(BLEServer *server) {
 
 BLECharacteristic *Ble::createSerialDataCharacteristic(BLEService *service) {
     class Callbacks: public BLECharacteristicCallbacks {
-        void onWrite(BLECharacteristic *pCharacteristic, esp_ble_gatts_cb_param_t *param) override {
-            uint8_t *data = pCharacteristic->getData();
-            size_t length = pCharacteristic->getLength();
+        void onWrite(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint8_t *data = characteristic->getData();
+            size_t length = characteristic->getLength();
 
             Log::print("ble serial data written:");
             for (size_t i = 0; i < length; ++i) {
@@ -212,7 +215,7 @@ BLECharacteristic *Ble::createSerialDataCharacteristic(BLEService *service) {
     Bluetooth::setDataCallback([=](const std::vector<uint8_t> &data) {
         Log::printf("got %d byte response:", data.size());
         for (uint8_t byte : data) {
-            Log::printf(" 0x%02X", byte);
+            Log::printf(" %02X", byte);
         }
         Log::print("\n");
 
@@ -227,7 +230,7 @@ BLECharacteristic *Ble::createSerialDataCharacteristic(BLEService *service) {
 
             Log::printf("got %d byte command:", buffer.size());
             for (uint8_t byte : buffer) {
-                Log::printf(" 0x%02X", byte);
+                Log::printf(" %02X", byte);
             }
             Log::print("\n");
 
@@ -237,6 +240,144 @@ BLECharacteristic *Ble::createSerialDataCharacteristic(BLEService *service) {
             buffer.clear();
         }
     });
+
+    return characteristic;
+}
+
+BLECharacteristic *Ble::createBluetoothScanCharacteristic(BLEService *service) {
+    class Callbacks: public BLECharacteristicCallbacks {
+        void onRead(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint8_t value = 0;
+            if (is_scanning) {
+                value = 1;
+            } else if (!Bluetooth::canScan()) {
+                value = 0xFF;
+            }
+
+            characteristic->setValue(&value, 1);
+        }
+
+        void onWrite(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint8_t *data = characteristic->getData();
+            size_t length = characteristic->getLength();
+
+            if (length < 1) {
+                return;
+            }
+
+            if (data[0] == 0) {
+                Bluetooth::cancelScan();
+                return;
+            }
+
+            Bluetooth::scan([=](const AdvertisedDevice &advertisedDevice) {
+                // TODO: Filter to X1 devices using COD (0x1F00) and name prefix (SLMK1).
+                //       Name: SLMK1xxxx, Address: 00:06:66:xx:xx:xx, cod: 7936, rssi: -60
+                std::string name = advertisedDevice.name ? *advertisedDevice.name : "";
+                const auto &address = advertisedDevice.address;
+                Log::printf("new bt device: %s (%02X:%02X:%02X:%02X:%02X:%02X)\n",
+                    !name.empty() ? name.c_str() : "-unset-",
+                    address[0], address[1], address[2], address[3], address[4], address[5]);
+
+                std::vector<uint8_t> value(address.size() + name.size());
+                auto after_address = std::copy(address.begin(), address.end(), value.begin());
+                std::copy(name.begin(), name.end(), after_address);
+                characteristic->setValue(value.data(), value.size());
+                characteristic->notify();
+            }, [=](bool canceled) {
+                Log::printf("bluetooth discovery %s\n", canceled ? "canceled" : "completed");
+
+                is_scanning = false;
+
+                std::array<uint8_t, 6> null_address = {};
+                characteristic->setValue(null_address.data(), null_address.size());
+                characteristic->notify();
+            });
+
+            is_scanning = true;
+        }
+
+    private:
+        bool is_scanning = false;
+    };
+
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_BT_SCAN, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR | BLECharacteristic::PROPERTY_NOTIFY);
+    characteristic->setCallbacks(new Callbacks());
+    characteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM);
+
+    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    description_descriptor->setValue("Bluetooth Scan");
+    characteristic->addDescriptor(description_descriptor);
+
+    BLE2902 *configuration_descriptor = new BLE2902();
+    configuration_descriptor->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE_ENC_MITM);
+    client_config_descriptors.push_back(configuration_descriptor);
+    characteristic->addDescriptor(configuration_descriptor);
+
+    return characteristic;
+}
+
+BLECharacteristic *Ble::createBluetoothConnectCharacteristic(BLEService *service) {
+    class Callbacks: public BLECharacteristicCallbacks {
+        void onRead(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint8_t value = 0;
+            if (Bluetooth::isConnected()) {
+                value = 1;
+            } else if (!Config::getBtAddress()) {
+                value = 0xFF;
+            }
+
+            characteristic->setValue(&value, 1);
+        }
+
+        void onWrite(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint8_t *data = characteristic->getData();
+            size_t length = characteristic->getLength();
+
+            if (length < 1) {
+                return;
+            }
+
+            if (data[0] == 0) {
+                Log::print("disconnecting from device\n");
+                Bluetooth::disconnect();
+                return;
+            }
+
+            const auto address_opt = Config::getBtAddress();
+            if (!address_opt) {
+                Log::print("can not connect, address not set\n");
+                return;
+            }
+
+            const auto &address = *address_opt;
+            Log::printf("connecting to %02X:%02X:%02X:%02X:%02X:%02X\n",
+                address[0], address[1], address[2], address[3], address[4], address[5]);
+
+            Bluetooth::connect(address, [=](bool connected) {
+                Log::printf("connection state changed, now %s\n", connected ? "connected" : "disconnected");
+
+                uint8_t value = connected ? 1 : 0;
+                characteristic->setValue(&value, 1);
+                characteristic->notify();
+            });
+        }
+    };
+
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_BT_CONNECT, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR | BLECharacteristic::PROPERTY_NOTIFY);
+    characteristic->setCallbacks(new Callbacks());
+    characteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM);
+
+    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    description_descriptor->setValue("Bluetooth Connect");
+    characteristic->addDescriptor(description_descriptor);
+
+    BLE2902 *configuration_descriptor = new BLE2902();
+    configuration_descriptor->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE_ENC_MITM);
+    client_config_descriptors.push_back(configuration_descriptor);
+    characteristic->addDescriptor(configuration_descriptor);
 
     return characteristic;
 }
@@ -286,9 +427,9 @@ BLECharacteristic *Ble::createDebugLogCharacteristic(BLEService *service) {
 
 BLECharacteristic *Ble::createRestartCharacteristic(BLEService *service) {
     class Callbacks: public BLECharacteristicCallbacks {
-        void onWrite(BLECharacteristic *pCharacteristic, esp_ble_gatts_cb_param_t *param) override {
-            uint8_t *data = pCharacteristic->getData();
-            size_t length = pCharacteristic->getLength();
+        void onWrite(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint8_t *data = characteristic->getData();
+            size_t length = characteristic->getLength();
 
             bool erase_config = (length >= 1) && data[0] != 0;
             if (erase_config) {
