@@ -53,6 +53,8 @@ void checkBatteryLevel() {
 
     // TODO: Tune the cutoff values.
     if (millivolts < 3200) {
+        Log::print("battery level low, going to deep sleep");
+
         // Gracefully clean up.
         Bluetooth::deinit();
         Ble::deinit();
@@ -81,12 +83,8 @@ void startBatteryMonitorTask() {
 
 void setup() {
     // When deploying from macOS, we're late to connect.
-    Log::print("waiting for connection ...");
+    Log::print("waiting ");
     for (int i = 0; i < 5; ++i) {
-        if (Serial.available() > 0) {
-            break;
-        }
-
         delay(1000);
         Log::print(".");
     }
@@ -101,14 +99,15 @@ void setup() {
 
     startLedBlinkTask();
 
-    Ble::init(Config::getName(), Config::getPinCode());
+    // The name is shared internally in the BT stack, so must be the same for both.
+    std::string name = Config::getName();
+    Ble::init(name, Config::getPinCode());
+    Bluetooth::init(name);
 
     // Run battery monitor again now BLE is up to populate the battery level characteristic.
     checkBatteryLevel();
 
 #if 1
-    Bluetooth::init(Config::getName());
-
     Log::print("about to scan ...\n");
 
     TaskHandle_t task = xTaskGetCurrentTaskHandle();

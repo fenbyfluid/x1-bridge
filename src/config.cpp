@@ -1,4 +1,5 @@
 #include "config.h"
+#include "defaults.h"
 
 #include <nvs.h>
 
@@ -14,7 +15,7 @@ std::string Config::getName() {
     }
 
     if (length == 0) {
-        return "X1 Bridge";
+        return DEFAULT_NAME;
     }
 
     std::string value(length, '\0');
@@ -50,7 +51,7 @@ uint32_t Config::getPinCode() {
     }
 
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        return 123456;
+        return DEFAULT_PIN;
     }
 
     return value;

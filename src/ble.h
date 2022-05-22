@@ -41,7 +41,8 @@
 //   X1_GATT_UUID_RESET
 //     - Write: reset module, param to erase config first
 //   X1_GATT_UUID_OTA_UPDATE
-//     - TODO: OTA update mechanism?
+//     - Write: ota update message
+//     - Notify: ota update status
 
 class BLEServer;
 class BLEService;
@@ -58,5 +59,6 @@ private:
     static void initBatteryService(BLEServer *server);
     static void initBridgeService(BLEServer *server);
     static BLECharacteristic *createSerialDataCharacteristic(BLEService *service);
+    static BLECharacteristic *createOtaUpdateCharacteristic(BLEService *service);
     static BLECharacteristic *createBatteryVoltageCharacteristic(BLEService *service);
 };
