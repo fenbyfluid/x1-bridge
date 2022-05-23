@@ -100,6 +100,8 @@ void Ble::init(const std::string &name, uint32_t pin_code) {
         Log::printf("ble connection auth failed, reason: %d\n", ev_param.fail_reason);
 
         // TODO: Can / should we kick off the peer?
+        //       Apparently we can, lets try this.
+        esp_ble_gap_disconnect(ev_param.bd_addr);
     });
 
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &pin_code, sizeof(pin_code));
@@ -110,12 +112,25 @@ void Ble::init(const std::string &name, uint32_t pin_code) {
     uint8_t key_size = 16;
     esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
 
-    // TODO: Allow bonding?
-    esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM;
+    esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
     esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
+
+    uint8_t only_accept_specified_auth = ESP_BLE_ONLY_ACCEPT_SPECIFIED_AUTH_ENABLE;
+    esp_ble_gap_set_security_param(ESP_BLE_SM_ONLY_ACCEPT_SPECIFIED_SEC_AUTH, &only_accept_specified_auth, sizeof(only_accept_specified_auth));
 
     uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
+
+    int bonded_count = esp_ble_get_bond_device_num();
+    Log::printf("have %d bonded ble devices\n", bonded_count);
+
+    std::vector<esp_ble_bond_dev_t> bonded_devices(bonded_count);
+    esp_ble_get_bond_device_list(&bonded_count, bonded_devices.data());
+    for (const auto &device : bonded_devices) {
+        Log::printf("  %02X:%02X:%02X:%02X:%02X:%02X\n",
+            device.bd_addr[0], device.bd_addr[1], device.bd_addr[2],
+            device.bd_addr[3], device.bd_addr[4], device.bd_addr[5]);
+    }
 
     BLEServer *server = BLEDevice::createServer();
     server->setCallbacks(&ble_server_callbacks);
@@ -271,7 +286,7 @@ BLECharacteristic *Ble::createBluetoothScanCharacteristic(BLEService *service) {
             }
 
             bool cancel_scan = (data[0] == 0);
-            Log::printf("ble client %s bt scan", cancel_scan ? "canceled" : "requested");
+            Log::printf("ble client %s bt scan\n", cancel_scan ? "canceled" : "requested");
 
             if (cancel_scan) {
                 Bluetooth::cancelScan();
