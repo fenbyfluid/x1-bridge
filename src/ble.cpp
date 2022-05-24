@@ -9,26 +9,43 @@
 #include <BLE2902.h>
 #include <BLE2904.h>
 
+#include <esp_sleep.h>
 #include <esp_ota_ops.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/ecdsa.h>
 #include <mbedtls/error.h>
 
+static void gracefulCleanup() {
+    Bluetooth::deinit();
+    Ble::deinit();
+    vTaskDelay((2 * 1000) / portTICK_PERIOD_MS);
+}
+
+static void gracefulSleep() {
+    xTaskCreatePinnedToCore([](void *) {
+        vTaskDelay((1 * 1000) / portTICK_PERIOD_MS);
+
+        gracefulCleanup();
+
+        Log::print("cleanup complete, sleeping\n");
+        esp_deep_sleep_start();
+    }, "sleep", CONFIG_ESP_MAIN_TASK_STACK_SIZE, nullptr, 1, nullptr, CONFIG_ARDUINO_RUNNING_CORE);
+}
+
 static void gracefulRestart() {
     xTaskCreatePinnedToCore([](void *) {
         vTaskDelay((1 * 1000) / portTICK_PERIOD_MS);
 
-        // Gracefully clean up.
-        Bluetooth::deinit();
-        Ble::deinit();
-        vTaskDelay((5 * 1000) / portTICK_PERIOD_MS);
+        gracefulCleanup();
 
         Log::print("cleanup complete, restarting\n");
         esp_restart();
     }, "restart", CONFIG_ESP_MAIN_TASK_STACK_SIZE, nullptr, 1, nullptr, CONFIG_ARDUINO_RUNNING_CORE);
 }
 
-static bool is_client_connected = false;
+static std::optional<std::array<uint8_t, 6>> connected_client = std::nullopt;
+static time_t last_activity_time = 0;
+
 static std::vector<BLE2902 *> client_config_descriptors;
 
 // Battery Service
@@ -52,26 +69,32 @@ static BLECharacteristic *battery_voltage = nullptr;
 //           and value before looping the clients, so we'd need to modify BLECharacteristic
 //           to implement it properly.
 static class MyBleServerCallbacks: public BLEServerCallbacks {
-    virtual void onConnect(BLEServer *server) override {
+    virtual void onConnect(BLEServer *server, esp_ble_gatts_cb_param_t *param) override {
         Log::print("ble client connected\n");
 
-        is_client_connected = true;
+        assert(!connected_client.has_value());
 
-        // TODO: It may be worthwhile to add an application-level heartbeat so that
-        //       we can forcibly disconnect peers that aren't doing anything.
-        // TODO: How *do* we disconnect a peer?
+        std::array<uint8_t, 6> address;
+        std::copy(param->connect.remote_bda, param->connect.remote_bda + 6, address.begin());
+        connected_client = std::make_optional(address);
+
+        last_activity_time = time(nullptr);
+        Log::printf("client connect time: %d\n", last_activity_time);
     }
 
     void onDisconnect(BLEServer *server) override {
-        Log::print("ble client disconnected\n");
-
-        is_client_connected = false;
+        connected_client = std::nullopt;
 
         // Reset the notifications / indications preference.
         for (auto client_config : client_config_descriptors) {
             client_config->setNotifications(false);
             client_config->setIndications(false);
         }
+
+        Log::print("ble client disconnected\n");
+
+        last_activity_time = time(nullptr);
+        Log::printf("client disconnect time: %d\n", last_activity_time);
 
         // We have to restart advertising each time a client disconnects.
         server->getAdvertising()->start();
@@ -103,6 +126,58 @@ void Ble::init(const std::string &name, uint32_t pin_code) {
         //       Apparently we can, lets try this.
         esp_ble_gap_disconnect(ev_param.bd_addr);
     });
+
+    BLEDevice::setCustomGattsHandler([](esp_gatts_cb_event_t event, esp_gatt_if_t gatt_if, esp_ble_gatts_cb_param_t *param) {
+        // We can crash if we try to notify from inside here, we also don't want the log updating the activity time.
+        auto suspender = Log::suspendOutputCallback();
+
+        // Log::printf("gatt event: %d, %d\n", event, gatt_if);
+
+        // The BLEDevice library doesn't handle this, and it keeps catching us out.
+        if (event == ESP_GATTS_ADD_CHAR_EVT && param->add_char.status != ESP_GATT_OK) {
+            Log::printf("!!! ESP_GATTS_ADD_CHAR_EVT failed (%02x), check handle count !!!\n", param->add_char.status);
+        } else if (event == ESP_GATTS_ADD_CHAR_DESCR_EVT && param->add_char_descr.status != ESP_GATT_OK) {
+            Log::printf("!!! ESP_GATTS_ADD_CHAR_DESCR_EVT failed (%02x), check handle count !!!\n", param->add_char_descr.status);
+        }
+
+        // ESP_GATTS_CONF_EVT is fired when our notifications are confirmed.
+        if (event == ESP_GATTS_READ_EVT || event == ESP_GATTS_WRITE_EVT || event == ESP_GATTS_EXEC_WRITE_EVT || event == ESP_GATTS_CONF_EVT) {
+            last_activity_time = time(nullptr);
+
+            Log::printf("updated client last activity time: %d (reason: %d)\n", last_activity_time, event);
+        }
+    });
+
+    xTaskCreatePinnedToCore([](void *parameters) {
+        for (;;) {
+            time_t now = time(nullptr);
+            time_t idle_time = now - last_activity_time;
+
+            {
+                // We don't want the log updating the activity time.
+                auto suspender = Log::suspendOutputCallback();
+                Log::printf("client idle time: %d\n", idle_time);
+            }
+
+            if (connected_client) {
+                // TODO: Tune this. Currently set so our battery monitor keeps
+                //       the connection alive if notifications are enabled.
+                if (idle_time >= Config::getConnectedIdleTimeout()) {
+                    Log::print("disconnecting client due to idle timeout\n");
+                    esp_ble_gap_disconnect(connected_client->data());
+                    last_activity_time = now;
+                }
+            } else {
+                if (idle_time >= Config::getDisconnectedIdleTimeout()) {
+                    Log::print("going to sleep due to idle timeout\n");
+                    gracefulCleanup();
+                    esp_deep_sleep_start();
+                }
+            }
+
+            vTaskDelay((30 * 1000) / portTICK_PERIOD_MS);
+        }
+    }, "bleTimeout", CONFIG_ARDUINO_LOOP_STACK_SIZE, nullptr, 1, nullptr, CONFIG_ARDUINO_RUNNING_CORE);
 
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &pin_code, sizeof(pin_code));
 
@@ -148,7 +223,7 @@ void Ble::deinit() {
 }
 
 bool Ble::isClientConnected() {
-    return is_client_connected;
+    return connected_client.has_value();
 }
 
 void Ble::updateBatteryLevel(uint8_t level, uint32_t millivolts) {
@@ -181,9 +256,8 @@ void Ble::initBatteryService(BLEServer *server) {
 void Ble::initBridgeService(BLEServer *server) {
     // Enough handles need to be allocated for the characteristics and their descriptions.
     // If there aren't enough, things will start disappearing when querying the service.
-    // Need approximately (2 * number of characteristics) + number of descriptors
-    // TODO: Is failure indicated to the ESP_GATTS_ADD_CHAR_EVT event?
-    BLEService *service = server->createService(BLEUUID(X1_GATT_UUID_BRIDGE_SVC), 50);
+    // Need approximately (2 * number of characteristics) + number of descriptors.
+    BLEService *service = server->createService(BLEUUID(X1_GATT_UUID_BRIDGE_SVC), 60);
 
     createSerialDataCharacteristic(service);
     createBluetoothScanCharacteristic(service);
@@ -191,9 +265,12 @@ void Ble::initBridgeService(BLEServer *server) {
     createConfigNameCharacteristic(service);
     createConfigPinCodeCharacteristic(service);
     createConfigBluetoothAddressCharacteristic(service);
+    createConfigConnectedIdleTimeoutCharacteristic(service);
+    createConfigDisconnectedIdleTimeoutCharacteristic(service);
     battery_voltage = createBatteryVoltageCharacteristic(service);
     createDebugLogCharacteristic(service);
     createRestartCharacteristic(service);
+    createSleepCharacteristic(service);
     createOtaUpdateCharacteristic(service);
 
     service->start();
@@ -542,6 +619,98 @@ BLECharacteristic *Ble::createConfigBluetoothAddressCharacteristic(BLEService *s
     return characteristic;
 }
 
+BLECharacteristic *Ble::createConfigConnectedIdleTimeoutCharacteristic(BLEService *service) {
+    class Callbacks: public BLECharacteristicCallbacks {
+        void onRead(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint32_t timeout = Config::getConnectedIdleTimeout();
+
+            characteristic->setValue(timeout);
+        }
+
+        void onWrite(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint8_t *data = characteristic->getData();
+            size_t length = characteristic->getLength();
+
+            if (length != 4) {
+                Log::printf("attempt to set connected idle timeout had wrong value length (%d != %d)\n", length, 4);
+                return;
+            }
+
+            uint32_t timeout = (data[3] << 24) | (data[2] << 16) | (data[1] << 8) | data[0];
+
+            Config::setConnectedIdleTimeout(timeout);
+
+            Log::printf("changed connected idle timeout to %d\n", timeout);
+        }
+    };
+
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_CONFIG_CON_IDLE, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    characteristic->setCallbacks(new Callbacks());
+    characteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM);
+
+    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    description_descriptor->setValue("Connected Idle Timeout");
+    characteristic->addDescriptor(description_descriptor);
+
+    BLE2904 *presentation_descriptor = new BLE2904();
+    presentation_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    presentation_descriptor->setFormat(BLE2904::FORMAT_UINT32);
+    presentation_descriptor->setExponent(0);
+    presentation_descriptor->setNamespace(1);
+    presentation_descriptor->setUnit(0x2703); // seconds
+    presentation_descriptor->setDescription(0);
+    characteristic->addDescriptor(presentation_descriptor);
+
+    return characteristic;
+}
+
+BLECharacteristic *Ble::createConfigDisconnectedIdleTimeoutCharacteristic(BLEService *service) {
+    class Callbacks: public BLECharacteristicCallbacks {
+        void onRead(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint32_t timeout = Config::getDisconnectedIdleTimeout();
+
+            characteristic->setValue(timeout);
+        }
+
+        void onWrite(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint8_t *data = characteristic->getData();
+            size_t length = characteristic->getLength();
+
+            if (length != 4) {
+                Log::printf("attempt to set disconnected idle timeout had wrong value length (%d != %d)\n", length, 4);
+                return;
+            }
+
+            uint32_t timeout = (data[3] << 24) | (data[2] << 16) | (data[1] << 8) | data[0];
+
+            Config::setDisconnectedIdleTimeout(timeout);
+
+            Log::printf("changed disconnected idle timeout to %d\n", timeout);
+        }
+    };
+
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_CONFIG_CON_IDLE, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    characteristic->setCallbacks(new Callbacks());
+    characteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM);
+
+    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    description_descriptor->setValue("Disconnected Idle Timeout");
+    characteristic->addDescriptor(description_descriptor);
+
+    BLE2904 *presentation_descriptor = new BLE2904();
+    presentation_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    presentation_descriptor->setFormat(BLE2904::FORMAT_UINT32);
+    presentation_descriptor->setExponent(0);
+    presentation_descriptor->setNamespace(1);
+    presentation_descriptor->setUnit(0x2703); // seconds
+    presentation_descriptor->setDescription(0);
+    characteristic->addDescriptor(presentation_descriptor);
+
+    return characteristic;
+}
+
 BLECharacteristic *Ble::createBatteryVoltageCharacteristic(BLEService *service) {
     BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_BATTERY_VOLTAGE, BLECharacteristic::PROPERTY_READ);
     characteristic->setAccessPermissions(ESP_GATT_PERM_READ);
@@ -611,6 +780,30 @@ BLECharacteristic *Ble::createRestartCharacteristic(BLEService *service) {
     BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
     description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
     description_descriptor->setValue("Restart");
+    characteristic->addDescriptor(description_descriptor);
+
+    return characteristic;
+}
+
+BLECharacteristic *Ble::createSleepCharacteristic(BLEService *service) {
+    class Callbacks: public BLECharacteristicCallbacks {
+        void onWrite(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            uint8_t *data = characteristic->getData();
+            size_t length = characteristic->getLength();
+
+            Log::printf("sleep request from ble client\n");
+
+            gracefulSleep();
+        }
+    };
+
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_SLEEP, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    characteristic->setCallbacks(new Callbacks());
+    characteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM);
+
+    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    description_descriptor->setValue("Sleep");
     characteristic->addDescriptor(description_descriptor);
 
     return characteristic;

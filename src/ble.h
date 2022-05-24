@@ -2,17 +2,20 @@
 
 #include <string>
 
-#define X1_GATT_UUID_BRIDGE_SVC      "00001000-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_BATTERY_VOLTAGE "00002000-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_SERIAL_DATA     "00002001-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_BT_SCAN         "00002002-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_BT_CONNECT      "00002003-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_CONFIG_NAME     "00002004-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_CONFIG_PIN_CODE "00002005-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_CONFIG_BT_ADDR  "00002006-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_DEBUG_LOG       "00002007-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_RESTART         "00002008-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_OTA_UPDATE      "00002009-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_BRIDGE_SVC         "00001000-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_BATTERY_VOLTAGE    "00002000-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_SERIAL_DATA        "00002001-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_BT_SCAN            "00002002-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_BT_CONNECT         "00002003-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_CONFIG_NAME        "00002004-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_CONFIG_PIN_CODE    "00002005-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_CONFIG_BT_ADDR     "00002006-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_CONFIG_CON_IDLE    "0000200a-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_CONFIG_DISCON_IDLE "0000200b-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_DEBUG_LOG          "00002007-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_RESTART            "00002008-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_SLEEP              "0000200c-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_OTA_UPDATE         "00002009-7858-48fb-b797-8613e960da6a"
 
 // BLE API:
 //   X1_GATT_UUID_SERIAL_DATA
@@ -32,7 +35,11 @@
 //   X1_GATT_UUID_CONFIG_PIN_CODE
 //     - Write: u32 tied to config, restart required
 //   X1_GATT_UUID_CONFIG_BT_ADDR
-//     - Read / Write: u8[6] tied to config, restart required if already set
+//     - Read / Write: u8[6] tied to config, reconnect required
+//   X1_GATT_UUID_CONFIG_CON_SLEEP
+//     - Read / Write: u32 tied to config
+//   X1_GATT_UUID_CONFIG_DISCON_SLEEP
+//     - Read / Write: u32 tied to config
 //
 //   X1_GATT_UUID_BATTERY_VOLTAGE
 //     - Read: current battery voltage
@@ -40,6 +47,8 @@
 //     - Notify: log write
 //   X1_GATT_UUID_RESTART
 //     - Write: restart module, param to erase config first
+//   X1_GATT_UUID_SLEEP
+//     - Write: deep sleep module
 //   X1_GATT_UUID_OTA_UPDATE
 //     - Write: ota update message
 //     - Notify: ota update status
@@ -64,8 +73,11 @@ private:
     static BLECharacteristic *createConfigNameCharacteristic(BLEService *service);
     static BLECharacteristic *createConfigPinCodeCharacteristic(BLEService *service);
     static BLECharacteristic *createConfigBluetoothAddressCharacteristic(BLEService *service);
+    static BLECharacteristic *createConfigConnectedIdleTimeoutCharacteristic(BLEService *service);
+    static BLECharacteristic *createConfigDisconnectedIdleTimeoutCharacteristic(BLEService *service);
     static BLECharacteristic *createBatteryVoltageCharacteristic(BLEService *service);
     static BLECharacteristic *createDebugLogCharacteristic(BLEService *service);
     static BLECharacteristic *createRestartCharacteristic(BLEService *service);
+    static BLECharacteristic *createSleepCharacteristic(BLEService *service);
     static BLECharacteristic *createOtaUpdateCharacteristic(BLEService *service);
 };

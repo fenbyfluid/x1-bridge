@@ -42,33 +42,27 @@ void Config::setName(const std::string &name) {
 }
 
 uint32_t Config::getPinCode() {
-    nvs_handle_t handle = ensureInitialized();
-
-    uint32_t value = 0;
-    esp_err_t err = nvs_get_u32(handle, "pin-code", &value);
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        throwError("nvs_get_u32", err);
-    }
-
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        return DEFAULT_PIN;
-    }
-
-    return value;
+    return getUint32("pin-code", DEFAULT_PIN);
 }
 
 void Config::setPinCode(uint32_t pin_code) {
-    nvs_handle_t handle = ensureInitialized();
+    return setUint32("pin-code", pin_code);
+}
 
-    esp_err_t err = nvs_set_u32(handle, "pin-code", pin_code);
-    if (err != ESP_OK) {
-        throwError("nvs_set_str", err);
-    }
+uint32_t Config::getConnectedIdleTimeout() {
+    return getUint32("conn-timeout", DEFAULT_CONNECTED_IDLE_TIME);
+}
 
-    err = nvs_commit(handle);
-    if (err != ESP_OK) {
-        throwError("nvs_commit", err);
-    }
+void Config::setConnectedIdleTimeout(uint32_t timeout) {
+    return setUint32("conn-timeout", timeout);
+}
+
+uint32_t Config::getDisconnectedIdleTimeout() {
+    return getUint32("disconn-timeout", DEFAULT_DISCONNECTED_IDLE_TIME);
+}
+
+void Config::setDisconnectedIdleTimeout(uint32_t timeout) {
+    return setUint32("disconn-timeout", timeout);
 }
 
 std::optional<std::array<uint8_t, 6>> Config::getBtAddress() {
@@ -142,4 +136,34 @@ void Config::throwError(const std::string &label, esp_err_t err) {
     const char *name = esp_err_to_name(err);
 
     throw std::runtime_error(label + ": " + name);
+}
+
+uint32_t Config::getUint32(const char *key, uint32_t fallback) {
+    nvs_handle_t handle = ensureInitialized();
+
+    uint32_t value = 0;
+    esp_err_t err = nvs_get_u32(handle, key, &value);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        throwError("nvs_get_u32", err);
+    }
+
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return fallback;
+    }
+
+    return value;
+}
+
+void Config::setUint32(const char *key, uint32_t value) {
+    nvs_handle_t handle = ensureInitialized();
+
+    esp_err_t err = nvs_set_u32(handle, key, value);
+    if (err != ESP_OK) {
+        throwError("nvs_set_str", err);
+    }
+
+    err = nvs_commit(handle);
+    if (err != ESP_OK) {
+        throwError("nvs_commit", err);
+    }
 }

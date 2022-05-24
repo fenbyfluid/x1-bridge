@@ -3,13 +3,18 @@
 #include <string>
 #include <stdexcept>
 
+static bool output_callback_suspended = false;
 static std::function<void(const char *message)> output_callback = nullptr;
+
+LogSuspender::~LogSuspender() {
+    output_callback_suspended = false;
+}
 
 void Log::print(const char *message) {
     ::fputs(message, stdout);
     ::fflush(stdout);
 
-    if (output_callback) {
+    if (output_callback && !output_callback_suspended) {
         output_callback(message);
     }
 }
@@ -35,6 +40,11 @@ void Log::vprintf(const char *format, va_list args) {
     vsnprintf(&buffer[0], buffer.size() + 1, format, args);
 
     print(buffer.c_str());
+}
+
+LogSuspender Log::suspendOutputCallback() {
+    output_callback_suspended = true;
+    return {};
 }
 
 void Log::setOutputCallback(std::function<void(const char *message)> function) {

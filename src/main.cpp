@@ -6,17 +6,12 @@
 #include <Arduino.h>
 
 void startLedBlinkTask() {
-    // Initialize LED digital pin as an output.
-    pinMode(LED_BUILTIN, OUTPUT);
-
     xTaskCreateUniversal([](void *pvParameters) {
         for (;;) {
-            // Turn the LED on (HIGH is the voltage level)
             digitalWrite(LED_BUILTIN, HIGH);
 
             delay(100);
 
-            // Turn the LED off by making the voltage LOW
             digitalWrite(LED_BUILTIN, LOW);
 
             if (!Ble::isClientConnected()) {
@@ -52,19 +47,13 @@ void checkBatteryLevel() {
     Ble::updateBatteryLevel(level, millivolts);
 
     // TODO: Tune the cutoff values.
-    if (millivolts < 3200) {
+    if (millivolts < 3100) {
         Log::print("battery level low, going to deep sleep");
 
         // Gracefully clean up.
         Bluetooth::deinit();
         Ble::deinit();
         delay(5 * 1000);
-
-        if (millivolts >= 3000) {
-            // Initial safety cut off - wake up again after 10 minutes.
-            // Otherwise we'll need a physical reset.
-            esp_sleep_enable_timer_wakeup(10 * 60 * 1000 * 1000);
-        }
 
         esp_deep_sleep_start();
     }
@@ -82,15 +71,15 @@ void startBatteryMonitorTask() {
 }
 
 void setup() {
-    // When deploying from macOS, we're late to connect.
-    Log::print("waiting ");
-    for (int i = 0; i < 5; ++i) {
-        delay(1000);
-        Log::print(".");
-    }
-    Log::print("\n");
-
     Log::print("hello, world\n");
+
+    // Increase our priority so our init tasks don't get interrupted.
+    vTaskPrioritySet(nullptr, 10);
+
+    // Turn the LED on immediately so we know we're on.
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(50);
 
     // Run immediately so that we skip startup if the voltage is too low.
     checkBatteryLevel();
