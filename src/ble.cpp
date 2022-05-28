@@ -373,15 +373,17 @@ BLECharacteristic *Ble::createBluetoothScanCharacteristic(BLEService *service) {
             Bluetooth::scan([=](const AdvertisedDevice &advertisedDevice) {
                 // TODO: Filter to X1 devices using COD (0x1F00) and name prefix (SLMK1).
                 //       Name: SLMK1xxxx, Address: 00:06:66:xx:xx:xx, cod: 7936, rssi: -60
-                std::string name = advertisedDevice.name ? *advertisedDevice.name : "";
+                const auto &name = advertisedDevice.name;
                 const auto &address = advertisedDevice.address;
-                Log::printf("new bt device: %s (%02X:%02X:%02X:%02X:%02X:%02X)\n",
-                    !name.empty() ? name.c_str() : "-unset-",
-                    address[0], address[1], address[2], address[3], address[4], address[5]);
+                Log::printf("new bt device: %s (%02X:%02X:%02X:%02X:%02X:%02X) %d\n",
+                    name.c_str(),
+                    address[0], address[1], address[2], address[3], address[4], address[5],
+                    advertisedDevice.rssi);
 
-                std::vector<uint8_t> value(address.size() + name.size());
+                std::vector<uint8_t> value(address.size() + 1 + name.size());
                 auto after_address = std::copy(address.begin(), address.end(), value.begin());
-                std::copy(name.begin(), name.end(), after_address);
+                *after_address = advertisedDevice.rssi;
+                std::copy(name.begin(), name.end(), after_address + 1);
                 characteristic->setValue(value.data(), value.size());
                 characteristic->notify();
             }, [=](bool canceled) {
@@ -389,8 +391,8 @@ BLECharacteristic *Ble::createBluetoothScanCharacteristic(BLEService *service) {
 
                 is_scanning = false;
 
-                std::array<uint8_t, 6> null_address = {};
-                characteristic->setValue(null_address.data(), null_address.size());
+                std::array<uint8_t, 7> null_update = {};
+                characteristic->setValue(null_update.data(), null_update.size());
                 characteristic->notify();
             });
 

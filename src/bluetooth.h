@@ -7,8 +7,8 @@
 
 struct AdvertisedDevice {
     std::array<uint8_t, 6> address;
-    std::optional<std::string> name;
-    std::optional<int8_t> rssi;
+    std::string name;
+    int8_t rssi;
 };
 
 class Bluetooth {
