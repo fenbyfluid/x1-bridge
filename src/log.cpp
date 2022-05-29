@@ -36,8 +36,9 @@ void Log::vprintf(const char *format, va_list args) {
         throw std::runtime_error("string formatting failed");
     }
 
-    std::string buffer(length, '\0');
-    vsnprintf(&buffer[0], buffer.size() + 1, format, args);
+    std::string buffer(length + 1, '\0');
+    vsnprintf(&buffer[0], buffer.size(), format, args);
+    buffer.resize(length);
 
     print(buffer.c_str());
 }

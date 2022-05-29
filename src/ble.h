@@ -35,7 +35,7 @@
 //   X1_GATT_UUID_CONFIG_PIN_CODE
 //     - Write: u32 tied to config, restart required
 //   X1_GATT_UUID_CONFIG_BT_ADDR
-//     - Read / Write: u8[6] tied to config, reconnect required
+//     - Read / Write: u8[6] + string tied to config, reconnect required
 //   X1_GATT_UUID_CONFIG_CON_SLEEP
 //     - Read / Write: u32 tied to config
 //   X1_GATT_UUID_CONFIG_DISCON_SLEEP

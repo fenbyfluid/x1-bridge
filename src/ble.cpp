@@ -370,7 +370,7 @@ BLECharacteristic *Ble::createBluetoothScanCharacteristic(BLEService *service) {
                 return;
             }
 
-            Bluetooth::scan([=](const AdvertisedDevice &advertisedDevice) {
+            is_scanning = Bluetooth::scan([=](const AdvertisedDevice &advertisedDevice) {
                 // TODO: Filter to X1 devices using COD (0x1F00) and name prefix (SLMK1).
                 //       Name: SLMK1xxxx, Address: 00:06:66:xx:xx:xx, cod: 7936, rssi: -60
                 const auto &name = advertisedDevice.name;
@@ -395,8 +395,6 @@ BLECharacteristic *Ble::createBluetoothScanCharacteristic(BLEService *service) {
                 characteristic->setValue(null_update.data(), null_update.size());
                 characteristic->notify();
             });
-
-            is_scanning = true;
         }
 
     private:
@@ -568,11 +566,17 @@ BLECharacteristic *Ble::createConfigBluetoothAddressCharacteristic(BLEService *s
     class Callbacks: public BLECharacteristicCallbacks {
         void onRead(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
             auto address = Config::getBtAddress();
-            if (address) {
-                characteristic->setValue(address->data(), address->size());
-            } else {
+            if (!address) {
                 characteristic->setValue(nullptr, 0);
+                return;
             }
+
+            auto name = Config::getBtAddressName().value_or("");
+
+            std::vector<uint8_t> value(address->size() + name.size());
+            auto after_address = std::copy(address->begin(), address->end(), value.begin());
+            std::copy(name.begin(), name.end(), after_address);
+            characteristic->setValue(value.data(), value.size());
         }
 
         void onWrite(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
@@ -581,22 +585,28 @@ BLECharacteristic *Ble::createConfigBluetoothAddressCharacteristic(BLEService *s
 
             if (length == 0) {
                 Config::setBtAddress(std::nullopt);
+                Config::setBtAddressName(std::nullopt);
 
                 Log::print("cleared bt addr\n");
                 return;
             }
 
-            if (length != 6) {
-                Log::printf("attempt to set bt addr had wrong value length (%d != %d)\n", length, 6);
+            if (length < 6) {
+                Log::printf("attempt to set bt addr had wrong value length (%d < %d)\n", length, 6);
                 return;
             }
 
             std::array<uint8_t, 6> address;
-            std::copy(data, data + length, address.begin());
-            Config::setBtAddress(std::make_optional(address));
+            std::copy(data, data + address.size(), address.begin());
+            Config::setBtAddress(address);
 
-            Log::printf("changed bt addr to %02X:%02X:%02X:%02X:%02X:%02X\n",
-                address[0], address[1], address[2], address[3], address[4], address[5]);
+            std::string name(length - address.size(), '\0');
+            std::copy(data + address.size(), data + length, name.begin());
+            Config::setBtAddressName(name);
+
+            Log::printf("changed bt addr to %02X:%02X:%02X:%02X:%02X:%02X (%s)\n",
+                address[0], address[1], address[2], address[3], address[4], address[5],
+                name.c_str());
         }
     };
 
@@ -609,6 +619,9 @@ BLECharacteristic *Ble::createConfigBluetoothAddressCharacteristic(BLEService *s
     description_descriptor->setValue("Bluetooth Address");
     characteristic->addDescriptor(description_descriptor);
 
+#if 0
+    // TODO: We cant include a presentation descriptor for this one as the value is
+    //       composite, and that needs multiple which the wrapper doesn't support.
     BLE2904 *presentation_descriptor = new BLE2904();
     presentation_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
     presentation_descriptor->setFormat(BLE2904::FORMAT_UINT48);
@@ -617,6 +630,7 @@ BLECharacteristic *Ble::createConfigBluetoothAddressCharacteristic(BLEService *s
     presentation_descriptor->setUnit(0x2700); // unitless
     presentation_descriptor->setDescription(0);
     characteristic->addDescriptor(presentation_descriptor);
+#endif
 
     return characteristic;
 }

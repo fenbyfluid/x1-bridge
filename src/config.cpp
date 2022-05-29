@@ -6,63 +6,35 @@
 #include <stdexcept>
 
 std::string Config::getName() {
-    nvs_handle_t handle = ensureInitialized();
-
-    size_t length = 0;
-    esp_err_t err = nvs_get_str(handle, "name", nullptr, &length);
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        throwError("nvs_get_str (len)", err);
-    }
-
-    if (length == 0) {
-        return DEFAULT_NAME;
-    }
-
-    std::string value(length, '\0');
-    err = nvs_get_str(handle, "name", &value[0], &length);
-    if (err != ESP_OK) {
-        throwError("nvs_get_str", err);
-    }
-
-    return value;
+    return getString("name").value_or(DEFAULT_NAME);
 }
 
 void Config::setName(const std::string &name) {
-    nvs_handle_t handle = ensureInitialized();
-
-    esp_err_t err = nvs_set_str(handle, "name", name.c_str());
-    if (err != ESP_OK) {
-        throwError("nvs_set_str", err);
-    }
-
-    err = nvs_commit(handle);
-    if (err != ESP_OK) {
-        throwError("nvs_commit", err);
-    }
+    setString("name", name);
 }
 
 uint32_t Config::getPinCode() {
-    return getUint32("pin-code", DEFAULT_PIN);
+    return getUint32("pin-code").value_or(DEFAULT_PIN);
 }
 
 void Config::setPinCode(uint32_t pin_code) {
-    return setUint32("pin-code", pin_code);
+    setUint32("pin-code", pin_code);
 }
 
 uint32_t Config::getConnectedIdleTimeout() {
-    return getUint32("conn-timeout", DEFAULT_CONNECTED_IDLE_TIME);
+    return getUint32("conn-timeout").value_or(DEFAULT_CONNECTED_IDLE_TIME);
 }
 
 void Config::setConnectedIdleTimeout(uint32_t timeout) {
-    return setUint32("conn-timeout", timeout);
+    setUint32("conn-timeout", timeout);
 }
 
 uint32_t Config::getDisconnectedIdleTimeout() {
-    return getUint32("disconn-timeout", DEFAULT_DISCONNECTED_IDLE_TIME);
+    return getUint32("disconn-timeout").value_or(DEFAULT_DISCONNECTED_IDLE_TIME);
 }
 
 void Config::setDisconnectedIdleTimeout(uint32_t timeout) {
-    return setUint32("disconn-timeout", timeout);
+    setUint32("disconn-timeout", timeout);
 }
 
 std::optional<std::array<uint8_t, 6>> Config::getBtAddress() {
@@ -79,7 +51,7 @@ std::optional<std::array<uint8_t, 6>> Config::getBtAddress() {
         return std::nullopt;
     }
 
-    return std::make_optional(value);
+    return value;
 }
 
 void Config::setBtAddress(const std::optional<std::array<uint8_t, 6>> &bt_address) {
@@ -102,6 +74,14 @@ void Config::setBtAddress(const std::optional<std::array<uint8_t, 6>> &bt_addres
     if (err != ESP_OK) {
         throwError("nvs_commit", err);
     }
+}
+
+std::optional<std::string> Config::getBtAddressName() {
+    return getString("bt-addr-name");
+}
+
+void Config::setBtAddressName(const std::optional<std::string> &name) {
+    setString("bt-addr-name", name);
 }
 
 void Config::reset() {
@@ -138,7 +118,7 @@ void Config::throwError(const std::string &label, esp_err_t err) {
     throw std::runtime_error(label + ": " + name);
 }
 
-uint32_t Config::getUint32(const char *key, uint32_t fallback) {
+std::optional<uint32_t> Config::getUint32(const char *key) {
     nvs_handle_t handle = ensureInitialized();
 
     uint32_t value = 0;
@@ -148,18 +128,73 @@ uint32_t Config::getUint32(const char *key, uint32_t fallback) {
     }
 
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        return fallback;
+        return std::nullopt;
     }
 
     return value;
 }
 
-void Config::setUint32(const char *key, uint32_t value) {
+void Config::setUint32(const char *key, const std::optional<uint32_t> &value) {
     nvs_handle_t handle = ensureInitialized();
 
-    esp_err_t err = nvs_set_u32(handle, key, value);
+    esp_err_t err;
+    if (value) {
+        err = nvs_set_u32(handle, key, *value);
+        if (err != ESP_OK) {
+            throwError("nvs_set_u32", err);
+        }
+    } else {
+        err = nvs_erase_key(handle, key);
+        if (err != ESP_OK) {
+            throwError("nvs_erase_key", err);
+        }
+    }
+
+    err = nvs_commit(handle);
     if (err != ESP_OK) {
-        throwError("nvs_set_str", err);
+        throwError("nvs_commit", err);
+    }
+}
+
+std::optional<std::string> Config::getString(const char *key) {
+    nvs_handle_t handle = ensureInitialized();
+
+    size_t length = 0;
+    esp_err_t err = nvs_get_str(handle, key, nullptr, &length);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        throwError("nvs_get_str (len)", err);
+    }
+
+    if (length == 0) {
+        return std::nullopt;
+    }
+
+    std::string value(length, '\0');
+    err = nvs_get_str(handle, key, &value[0], &length);
+    if (err != ESP_OK) {
+        throwError("nvs_get_str", err);
+    }
+
+    // Trim the extra terminator written by nvs_get_str.
+    value.resize(length - 1);
+
+    return value;
+}
+
+void Config::setString(const char *key, const std::optional<std::string> &value) {
+    nvs_handle_t handle = ensureInitialized();
+
+    esp_err_t err;
+    if (value) {
+        err = nvs_set_str(handle, key, value->c_str());
+        if (err != ESP_OK) {
+            throwError("nvs_set_str", err);
+        }
+    } else {
+        err = nvs_erase_key(handle, key);
+        if (err != ESP_OK) {
+            throwError("nvs_erase_key", err);
+        }
     }
 
     err = nvs_commit(handle);
