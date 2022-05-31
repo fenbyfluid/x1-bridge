@@ -17,5 +17,5 @@ public:
     static void vprintf(const char *format, va_list args);
 
     static LogSuspender suspendOutputCallback();
-    static void setOutputCallback(std::function<void(const char *message)> function);
+    static void setOutputCallback(std::function<void(const std::string &message)> function);
 };

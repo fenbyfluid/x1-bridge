@@ -102,6 +102,8 @@ static class MyBleServerCallbacks: public BLEServerCallbacks {
 } ble_server_callbacks;
 
 void Ble::init(const std::string &name, uint32_t pin_code) {
+    last_activity_time = time(nullptr);
+
     BLEDevice::init(name);
     // BLEDevice::setPower(ESP_PWR_LVL_P9);
 
@@ -144,7 +146,7 @@ void Ble::init(const std::string &name, uint32_t pin_code) {
         if (event == ESP_GATTS_READ_EVT || event == ESP_GATTS_WRITE_EVT || event == ESP_GATTS_EXEC_WRITE_EVT || event == ESP_GATTS_CONF_EVT) {
             last_activity_time = time(nullptr);
 
-            Log::printf("updated client last activity time: %d (reason: %d)\n", last_activity_time, event);
+            // Log::printf("updated client last activity time: %d (reason: %d)\n", last_activity_time, event);
         }
     });
 
@@ -155,8 +157,8 @@ void Ble::init(const std::string &name, uint32_t pin_code) {
 
             {
                 // We don't want the log updating the activity time.
-                auto suspender = Log::suspendOutputCallback();
-                Log::printf("client idle time: %d\n", idle_time);
+                // auto suspender = Log::suspendOutputCallback();
+                // Log::printf("client idle time: %d\n", idle_time);
             }
 
             if (connected_client) {
@@ -291,6 +293,79 @@ BLECharacteristic *Ble::createSerialDataCharacteristic(BLEService *service) {
             if (Bluetooth::isConnected()) {
                 // TODO: Should we validate anything about the data before passing it on? Probably a good idea.
                 Bluetooth::write(std::vector(data, data + length));
+
+                return;
+            }
+
+            // Mock tests.
+
+            Log::print("device not connected, handling mock commands\n");
+
+            if (length == 3 && data[0] == 'G' && data[1] == 's' && data[2] == '\n') {
+                characteristic->setValue("WARNING: test response\n");
+                characteristic->notify();
+
+                uint8_t response[] = { 's', 20, '\n' };
+
+                Log::printf("got %d byte response:", sizeof(response));
+                Log::printf(" %02X", response[0]);
+                Log::printf(" %02X", response[1]);
+                Log::printf(" %02X", response[2]);
+                Log::print("\n");
+
+                Log::printf("got %d byte command:", sizeof(response));
+                Log::printf(" %02X", response[0]);
+                Log::printf(" %02X", response[1]);
+                Log::printf(" %02X", response[2]);
+                Log::print("\n");
+
+                characteristic->setValue(response, sizeof(response));
+                characteristic->notify();
+
+                return;
+            }
+
+            if (length == 3 && data[0] == 'E' && data[1] == '+' && data[2] == '\n') {
+                characteristic->setValue("WARNING: test response\n");
+                characteristic->notify();
+
+                std::vector<std::array<uint8_t, 3>> responses = {
+                    { 'u', 0x00, '\n' },
+                    { 'm', 0x0E, '\n' },
+                    { 't', 0x00, '\n' },
+                    { 'p', 0x03, '\n' },
+                    { 'f', 0xB5, '\n' },
+                    { 'r', 0xB7, '\n' },
+                    { 'v', 0x16, '\n' },
+                    { 'l', 0x7B, '\n' },
+                    { 'c', 0x00, '\n' },
+                    { 'z', 0x00, '\n' },
+                    { '1', 0x0E, '\n' },
+                    { '2', 0x00, '\n' },
+                    { '3', 0x02, '\n' },
+                    { '4', 0x10, '\n' },
+                };
+
+                Log::printf("got %d byte response:", responses.size() * 3);
+                for (auto &response : responses) {
+                    Log::printf(" %02X", response[0]);
+                    Log::printf(" %02X", response[1]);
+                    Log::printf(" %02X", response[2]);
+                }
+                Log::print("\n");
+
+                for (auto &response : responses) {
+                    Log::printf("got %d byte command:", response.size());
+                    Log::printf(" %02X", response[0]);
+                    Log::printf(" %02X", response[1]);
+                    Log::printf(" %02X", response[2]);
+                    Log::print("\n");
+
+                    characteristic->setValue(response.data(), response.size());
+                    characteristic->notify();
+                }
+
+                return;
             }
         }
     };
@@ -706,7 +781,7 @@ BLECharacteristic *Ble::createConfigDisconnectedIdleTimeoutCharacteristic(BLESer
         }
     };
 
-    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_CONFIG_CON_IDLE, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_CONFIG_DISCON_IDLE, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
     characteristic->setCallbacks(new Callbacks());
     characteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM);
 
@@ -762,7 +837,7 @@ BLECharacteristic *Ble::createDebugLogCharacteristic(BLEService *service) {
     client_config_descriptors.push_back(configuration_descriptor);
     characteristic->addDescriptor(configuration_descriptor);
 
-    Log::setOutputCallback([=](const char *message) {
+    Log::setOutputCallback([=](const std::string &message) {
         characteristic->setValue(message);
         characteristic->notify();
     });

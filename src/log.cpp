@@ -4,7 +4,8 @@
 #include <stdexcept>
 
 static bool output_callback_suspended = false;
-static std::function<void(const char *message)> output_callback = nullptr;
+static std::string output_callback_buffer = "";
+static std::function<void(const std::string &message)> output_callback = nullptr;
 
 LogSuspender::~LogSuspender() {
     output_callback_suspended = false;
@@ -15,7 +16,19 @@ void Log::print(const char *message) {
     ::fflush(stdout);
 
     if (output_callback && !output_callback_suspended) {
-        output_callback(message);
+        output_callback_buffer.append(message);
+
+        for (;;) {
+            size_t newline = output_callback_buffer.find('\n');
+            if (newline == std::string::npos) {
+                break;
+            }
+
+            std::string line(output_callback_buffer.c_str(), newline);
+            output_callback_buffer.erase(0, newline + 1);
+
+            output_callback(line);
+        }
     }
 }
 
@@ -48,6 +61,6 @@ LogSuspender Log::suspendOutputCallback() {
     return {};
 }
 
-void Log::setOutputCallback(std::function<void(const char *message)> function) {
+void Log::setOutputCallback(std::function<void(const std::string &message)> function) {
     output_callback = function;
 }
