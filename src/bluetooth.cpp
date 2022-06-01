@@ -118,7 +118,7 @@ void Bluetooth::cancelScan() {
     scan_task = nullptr;
 }
 
-void Bluetooth::connect(std::array<uint8_t, 6> address, std::function<void(bool connected)> on_changed, uint32_t retry_count) {
+void Bluetooth::connect(std::array<uint8_t, 6> address, std::function<void(bool connected)> on_changed, std::function<void(uint8_t attempt, uint8_t count)> on_attempt, uint8_t retry_count) {
     // BluetoothSerial doesn't support discovery after having ever attempted to connect.
     can_scan = false;
 
@@ -132,12 +132,14 @@ void Bluetooth::connect(std::array<uint8_t, 6> address, std::function<void(bool 
     struct ConnectTaskParams {
         std::array<uint8_t, 6> address;
         std::function<void(bool connected)> on_changed;
-        uint32_t retry_count;
+        std::function<void(uint8_t attempt, uint8_t count)> on_attempt;
+        uint8_t retry_count;
     };
 
     ConnectTaskParams *params = new ConnectTaskParams {
         address,
         on_changed,
+        on_attempt,
         retry_count,
     };
 
@@ -146,7 +148,11 @@ void Bluetooth::connect(std::array<uint8_t, 6> address, std::function<void(bool 
         std::unique_ptr<ConnectTaskParams> params(static_cast<ConnectTaskParams *>(pvParameters));
 
         bool connected = false;
-        for (uint32_t i = 0; i < params->retry_count; ++i) {
+        for (uint8_t i = 0; i < params->retry_count; ++i) {
+            if (params->on_attempt) {
+                params->on_attempt(i + 1, params->retry_count);
+            }
+
             if (SerialBT.connect(params->address.data())) {
                 connected = true;
                 break;
@@ -154,11 +160,11 @@ void Bluetooth::connect(std::array<uint8_t, 6> address, std::function<void(bool 
         }
 
         params->on_changed(connected);
-        if (!connected) {
-            return;
+
+        if (connected) {
+            on_disconnect_callback = params->on_changed;
         }
 
-        on_disconnect_callback = params->on_changed;
         vTaskDelete(nullptr);
     }, "btConnect", getArduinoLoopTaskStackSize(), params, 1, nullptr, ARDUINO_RUNNING_CORE);
 }

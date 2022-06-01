@@ -523,6 +523,11 @@ BLECharacteristic *Ble::createBluetoothConnectCharacteristic(BLEService *service
             const auto address_opt = Config::getBtAddress();
             if (!address_opt) {
                 Log::print("can not connect, address not set\n");
+
+                uint8_t value[] = { 0, 0, 0 };
+                characteristic->setValue(value, sizeof(value));
+                characteristic->notify();
+
                 return;
             }
 
@@ -533,8 +538,14 @@ BLECharacteristic *Ble::createBluetoothConnectCharacteristic(BLEService *service
             Bluetooth::connect(address, [=](bool connected) {
                 Log::printf("connection state changed, now %s\n", connected ? "connected" : "disconnected");
 
-                uint8_t value = connected ? 1 : 0;
-                characteristic->setValue(&value, 1);
+                uint8_t value[] = { connected, 0, 0 };
+                characteristic->setValue(value, sizeof(value));
+                characteristic->notify();
+            }, [=](uint8_t attempt, uint8_t count) {
+                Log::printf("starting connection attempt %d/%d\n", attempt, count);
+
+                uint8_t value[] = { 0, attempt, count };
+                characteristic->setValue(value, sizeof(value));
                 characteristic->notify();
             });
         }
