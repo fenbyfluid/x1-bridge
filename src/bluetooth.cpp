@@ -18,18 +18,18 @@ BluetoothSerial SerialBT;
 
 bool can_scan = true;
 
-std::function<void(bool connected)> on_disconnect_callback = nullptr;
-
 TaskHandle_t scan_task = nullptr;
+TaskHandle_t connect_task = nullptr;
 
 void Bluetooth::init(const std::string &name) {
     SerialBT.begin(name.c_str(), true);
 }
 
 void Bluetooth::deinit() {
-    if (on_disconnect_callback) {
-        on_disconnect_callback(false);
-        on_disconnect_callback = nullptr;
+    disconnect();
+
+    while (isConnected()) {
+        vTaskDelay(1);
     }
 
     SerialBT.end();
@@ -124,9 +124,9 @@ void Bluetooth::connect(std::array<uint8_t, 6> address, std::function<void(bool 
 
     cancelScan();
 
-    if (on_disconnect_callback) {
-        on_disconnect_callback(false);
-        on_disconnect_callback = nullptr;
+    if (connect_task) {
+        xTaskNotifyGive(connect_task);
+        connect_task = nullptr;
     }
 
     struct ConnectTaskParams {
@@ -161,12 +161,33 @@ void Bluetooth::connect(std::array<uint8_t, 6> address, std::function<void(bool 
 
         params->on_changed(connected);
 
-        if (connected) {
-            on_disconnect_callback = params->on_changed;
+        if (!connected) {
+            vTaskDelete(nullptr);
+            return;
         }
 
+        // No callback for the connection being closed, so we have to poll.
+        bool notified = false;
+        for (;;) {
+            notified = ulTaskNotifyTake(pdTRUE, 1000 / portTICK_PERIOD_MS) != 0;
+            if (notified) {
+                break;
+            }
+
+            if (!SerialBT.hasClient()) {
+                break;
+            }
+        }
+
+        if (!notified) {
+            // TODO: We might need to actually check it is the same.
+            connect_task = nullptr;
+        }
+
+        params->on_changed(false);
+
         vTaskDelete(nullptr);
-    }, "btConnect", getArduinoLoopTaskStackSize(), params, 1, nullptr, ARDUINO_RUNNING_CORE);
+    }, "btConnect", getArduinoLoopTaskStackSize(), params, 1, &connect_task, ARDUINO_RUNNING_CORE);
 }
 
 void Bluetooth::disconnect() {
@@ -174,9 +195,9 @@ void Bluetooth::disconnect() {
     xTaskCreateUniversal([](void *pvParameters) {
         SerialBT.disconnect();
 
-        if (on_disconnect_callback) {
-            on_disconnect_callback(false);
-            on_disconnect_callback = nullptr;
+        if (connect_task) {
+            xTaskNotifyGive(connect_task);
+            connect_task = nullptr;
         }
 
         vTaskDelete(nullptr);
@@ -188,9 +209,9 @@ bool Bluetooth::isConnected() {
         return true;
     }
 
-    if (on_disconnect_callback) {
-        on_disconnect_callback(false);
-        on_disconnect_callback = nullptr;
+    if (connect_task) {
+        xTaskNotifyGive(connect_task);
+        connect_task = nullptr;
     }
 
     return false;
