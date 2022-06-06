@@ -10,12 +10,13 @@
 #define X1_GATT_UUID_CONFIG_NAME        "00002004-7858-48fb-b797-8613e960da6a"
 #define X1_GATT_UUID_CONFIG_PIN_CODE    "00002005-7858-48fb-b797-8613e960da6a"
 #define X1_GATT_UUID_CONFIG_BT_ADDR     "00002006-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_CONFIG_CON_IDLE    "0000200a-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_CONFIG_DISCON_IDLE "0000200b-7858-48fb-b797-8613e960da6a"
 #define X1_GATT_UUID_DEBUG_LOG          "00002007-7858-48fb-b797-8613e960da6a"
 #define X1_GATT_UUID_RESTART            "00002008-7858-48fb-b797-8613e960da6a"
-#define X1_GATT_UUID_SLEEP              "0000200c-7858-48fb-b797-8613e960da6a"
 #define X1_GATT_UUID_OTA_UPDATE         "00002009-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_CONFIG_CON_IDLE    "0000200a-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_CONFIG_DISCON_IDLE "0000200b-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_SLEEP              "0000200c-7858-48fb-b797-8613e960da6a"
+#define X1_GATT_UUID_MTU_INFO           "0000200d-7858-48fb-b797-8613e960da6a"
 
 // BLE API:
 //   X1_GATT_UUID_SERIAL_DATA
@@ -52,6 +53,8 @@
 //   X1_GATT_UUID_OTA_UPDATE
 //     - Write: ota update message
 //     - Notify: ota update status
+//   X1_GATT_UUID_MTU
+//     - Read: u32 current mtu
 
 class BLEServer;
 class BLEService;
@@ -80,4 +83,5 @@ private:
     static BLECharacteristic *createRestartCharacteristic(BLEService *service);
     static BLECharacteristic *createSleepCharacteristic(BLEService *service);
     static BLECharacteristic *createOtaUpdateCharacteristic(BLEService *service);
+    static BLECharacteristic *createMtuInfoCharacteristic(BLEService *service);
 };

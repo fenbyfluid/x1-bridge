@@ -11,6 +11,7 @@
 
 #include <esp_sleep.h>
 #include <esp_ota_ops.h>
+#include <esp_gatt_common_api.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/ecdsa.h>
 #include <mbedtls/error.h>
@@ -44,6 +45,7 @@ static void gracefulRestart() {
 }
 
 static std::optional<std::array<uint8_t, 6>> connected_client = std::nullopt;
+static uint16_t current_mtu = 0;
 static time_t last_activity_time = 0;
 
 static std::vector<BLE2902 *> client_config_descriptors;
@@ -78,6 +80,8 @@ static class MyBleServerCallbacks: public BLEServerCallbacks {
         std::copy(param->connect.remote_bda, param->connect.remote_bda + 6, address.begin());
         connected_client = std::make_optional(address);
 
+        current_mtu = ESP_GATT_DEF_BLE_MTU_SIZE;
+
         last_activity_time = time(nullptr);
         Log::printf("client connect time: %d\n", last_activity_time);
     }
@@ -106,6 +110,7 @@ void Ble::init(const std::string &name, uint32_t pin_code) {
 
     BLEDevice::init(name);
     // BLEDevice::setPower(ESP_PWR_LVL_P9);
+    BLEDevice::setMTU(ESP_GATT_MAX_MTU_SIZE);
 
     // We use this as setSecurityCallbacks appears to opt in to a bunch of behaviour we don't want.
     // TODO: It's possible all the extra bits are events that are never called with our config though.
@@ -140,6 +145,12 @@ void Ble::init(const std::string &name, uint32_t pin_code) {
             Log::printf("!!! ESP_GATTS_ADD_CHAR_EVT failed (%02x), check handle count !!!\n", param->add_char.status);
         } else if (event == ESP_GATTS_ADD_CHAR_DESCR_EVT && param->add_char_descr.status != ESP_GATT_OK) {
             Log::printf("!!! ESP_GATTS_ADD_CHAR_DESCR_EVT failed (%02x), check handle count !!!\n", param->add_char_descr.status);
+        }
+
+        if (event == ESP_GATTS_MTU_EVT) {
+            Log::printf("ble client mtu updated from %d to %d\n", current_mtu, param->mtu.mtu);
+
+            current_mtu = param->mtu.mtu;
         }
 
         // ESP_GATTS_CONF_EVT is fired when our notifications are confirmed.
@@ -274,6 +285,7 @@ void Ble::initBridgeService(BLEServer *server) {
     createRestartCharacteristic(service);
     createSleepCharacteristic(service);
     createOtaUpdateCharacteristic(service);
+    createMtuInfoCharacteristic(service);
 
     service->start();
 }
@@ -446,8 +458,6 @@ BLECharacteristic *Ble::createBluetoothScanCharacteristic(BLEService *service) {
             }
 
             is_scanning = Bluetooth::scan([=](const AdvertisedDevice &advertisedDevice) {
-                // TODO: Filter to X1 devices using COD (0x1F00) and name prefix (SLMK1).
-                //       Name: SLMK1xxxx, Address: 00:06:66:xx:xx:xx, cod: 7936, rssi: -60
                 const auto &name = advertisedDevice.name;
                 const auto &address = advertisedDevice.address;
                 Log::printf("new bt device: %s (%02X:%02X:%02X:%02X:%02X:%02X) %d\n",
@@ -914,6 +924,45 @@ BLECharacteristic *Ble::createSleepCharacteristic(BLEService *service) {
 BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
 #if defined OTA_PUBLIC_KEY_X && defined OTA_PUBLIC_KEY_Y
     class Callbacks: public BLECharacteristicCallbacks {
+        void onRead(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            // Clear out the value, in case we error.
+            characteristic->setValue(nullptr, 0);
+
+            char sig_error[256];
+
+            mbedtls_ecp_keypair sig_key;
+            mbedtls_ecp_keypair_init(&sig_key);
+
+            int sig_err = mbedtls_ecp_group_load(&sig_key.grp, MBEDTLS_ECP_DP_SECP256R1);
+
+            if (sig_err != 0) {
+                mbedtls_strerror(sig_err, sig_error, sizeof(sig_error));
+                Log::printf("mbedtls_ecp_group_load: %s (%d)\n", sig_error, sig_err);
+                return;
+            }
+
+            sig_err = mbedtls_ecp_point_read_string(&sig_key.Q, 16, QUOTE(OTA_PUBLIC_KEY_X), QUOTE(OTA_PUBLIC_KEY_Y));
+
+            if (sig_err != 0) {
+                mbedtls_strerror(sig_err, sig_error, sizeof(sig_error));
+                Log::printf("mbedtls_ecp_point_read_string: %s (%d)\n", sig_error, sig_err);
+                return;
+            }
+
+            size_t length = 0;
+            uint8_t buffer[1 + 1 + 32 + 32];
+            buffer[0] = 0x01; // We add an extra byte before the public key with our "OTA protocol version".
+            sig_err = mbedtls_ecp_point_write_binary(&sig_key.grp, &sig_key.Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &length, &buffer[1], sizeof(buffer) - 1);
+
+            if (sig_err != 0) {
+                mbedtls_strerror(sig_err, sig_error, sizeof(sig_error));
+                Log::printf("mbedtls_ecp_point_write_binary: %s (%d)\n", sig_error, sig_err);
+                return;
+            }
+
+            characteristic->setValue(buffer, length + 1);
+        }
+
         void onWrite(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
             this->characteristic = characteristic;
 
@@ -979,7 +1028,7 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
             esp_err_t err = esp_ota_begin(ota_partition, image_size, &ota_handle);
             if (err != ESP_OK) {
                 Log::printf("ble ota failed to start: %s (%d)\n", esp_err_to_name(err), err);
-                notify(false);
+                notify(true, false);
                 image_size = 0;
                 return;
             }
@@ -989,6 +1038,8 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
 
             mbedtls_sha256_init(&sha_ctx);
             mbedtls_sha256_starts_ret(&sha_ctx, 0);
+
+            notify(false, false);
         }
 
         void onOtaChunk(const uint8_t *data, size_t length) {
@@ -1003,7 +1054,7 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
 
             if ((bytes_written + length) > image_size) {
                 Log::printf("ble ota chunk out of bounds: (%d + %d) > %d\n", bytes_written, length, image_size);
-                notify(false);
+                notify(true, false);
                 image_size = 0;
                 esp_ota_abort(ota_handle);
                 mbedtls_sha256_free(&sha_ctx);
@@ -1013,7 +1064,7 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
             esp_err_t err = esp_ota_write(ota_handle, data, length);
             if (err != ESP_OK) {
                 Log::printf("ble ota failed to write: %s (%d)\n", esp_err_to_name(err), err);
-                notify(false);
+                notify(true, false);
                 image_size = 0;
                 esp_ota_abort(ota_handle);
                 mbedtls_sha256_free(&sha_ctx);
@@ -1025,6 +1076,8 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
             bytes_written += length;
 
             Log::printf("ble ota update chunk processed (%d / %d bytes)\n", bytes_written, image_size);
+
+            notify(false, false);
         }
 
         void onOtaFinish(const uint8_t *data, size_t length) {
@@ -1035,7 +1088,7 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
 
             if (bytes_written != image_size) {
                 Log::printf("ble ota finish message image size mismatch (%d != %d)\n", bytes_written, image_size);
-                notify(false);
+                notify(true, false);
                 image_size = 0;
                 esp_ota_abort(ota_handle);
                 mbedtls_sha256_free(&sha_ctx);
@@ -1062,7 +1115,7 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
             if (sig_err != 0) {
                 mbedtls_strerror(sig_err, sig_error, sizeof(sig_error));
                 Log::printf("ble ota signature verification failed - mbedtls_ecp_group_load: %s (%d)\n", sig_error, sig_err);
-                notify(false);
+                notify(true, false);
                 image_size = 0;
                 esp_ota_abort(ota_handle);
                 return;
@@ -1073,7 +1126,7 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
             if (sig_err != 0) {
                 mbedtls_strerror(sig_err, sig_error, sizeof(sig_error));
                 Log::printf("ble ota signature verification failed - mbedtls_ecp_point_read_string: %s (%d)\n", sig_error, sig_err);
-                notify(false);
+                notify(true, false);
                 image_size = 0;
                 esp_ota_abort(ota_handle);
                 return;
@@ -1087,7 +1140,7 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
             if (sig_err != 0) {
                 mbedtls_strerror(sig_err, sig_error, sizeof(sig_error));
                 Log::printf("ble ota signature verification failed - mbedtls_ecdsa_from_keypair: %s (%d)\n", sig_error, sig_err);
-                notify(false);
+                notify(true, false);
                 image_size = 0;
                 esp_ota_abort(ota_handle);
                 return;
@@ -1098,7 +1151,7 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
             if (sig_err != 0) {
                 mbedtls_strerror(sig_err, sig_error, sizeof(sig_error));
                 Log::printf("ble ota signature verification failed - mbedtls_ecdsa_read_signature: %s (%d)\n", sig_error, sig_err);
-                notify(false);
+                notify(true, false);
                 image_size = 0;
                 esp_ota_abort(ota_handle);
                 return;
@@ -1112,7 +1165,7 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
             esp_err_t err = esp_ota_end(ota_handle);
             if (err != ESP_OK) {
                 Log::printf("ble ota failed to validate: %s (%d)\n", esp_err_to_name(err), err);
-                notify(false);
+                notify(true, false);
                 image_size = 0;
                 return;
             }
@@ -1120,22 +1173,28 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
             err = esp_ota_set_boot_partition(ota_partition);
             if (err != ESP_OK) {
                 Log::printf("ble ota failed to switch partition: %s (%d)\n", esp_err_to_name(err), err);
-                notify(false);
+                notify(true, false);
                 image_size = 0;
                 return;
             }
 
             Log::print("ble ota complete\n");
-            notify(true);
+            notify(true, true);
 
             // We're in the BLE handler task here. We can't suspend it.
             // TODO: We should probably move more of the update process out.
             gracefulRestart();
         }
 
-        void notify(bool success) {
-            uint8_t value = success ? 1 : 0;
-            characteristic->setValue(&value, 1);
+        void notify(bool complete, bool success) {
+            uint8_t byte_0 = complete ? 0xFF : (bytes_written & 0xFF);
+            uint8_t byte_1 = complete ? 0xFF : ((bytes_written >> 8) & 0xFF);
+            uint8_t byte_2 = complete ? 0xFF : ((bytes_written >> 16) & 0xFF);
+            uint8_t byte_3 = complete ? 0xFF : ((bytes_written >> 24) & 0xFF);
+            uint8_t byte_4 = success ? 1 : 0;
+
+            uint8_t value[5] = { byte_0, byte_1, byte_2, byte_3, byte_4 };
+            characteristic->setValue(value, sizeof(value));
             characteristic->notify();
         }
 
@@ -1147,7 +1206,7 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
         mbedtls_sha256_context sha_ctx;
     };
 
-    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_OTA_UPDATE, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR | BLECharacteristic::PROPERTY_NOTIFY);
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_OTA_UPDATE, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR | BLECharacteristic::PROPERTY_NOTIFY);
     characteristic->setCallbacks(new Callbacks());
     characteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM);
 
@@ -1168,4 +1227,33 @@ BLECharacteristic *Ble::createOtaUpdateCharacteristic(BLEService *service) {
 
     return nullptr;
 #endif
+}
+
+BLECharacteristic *Ble::createMtuInfoCharacteristic(BLEService *service) {
+    class Callbacks: public BLECharacteristicCallbacks {
+        void onRead(BLECharacteristic *characteristic, esp_ble_gatts_cb_param_t *param) override {
+            // param->read.conn_id
+            characteristic->setValue(current_mtu);
+        }
+    };
+
+    BLECharacteristic *characteristic = service->createCharacteristic(X1_GATT_UUID_MTU_INFO, BLECharacteristic::PROPERTY_READ);
+    characteristic->setCallbacks(new Callbacks());
+    characteristic->setAccessPermissions(ESP_GATT_PERM_READ);
+
+    BLEDescriptor *description_descriptor = new BLEDescriptor(BLEUUID((uint16_t)ESP_GATT_UUID_CHAR_DESCRIPTION));
+    description_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    description_descriptor->setValue("Current MTU");
+    characteristic->addDescriptor(description_descriptor);
+
+    BLE2904 *presentation_descriptor = new BLE2904();
+    presentation_descriptor->setAccessPermissions(ESP_GATT_PERM_READ);
+    presentation_descriptor->setFormat(BLE2904::FORMAT_UINT16);
+    presentation_descriptor->setExponent(0);
+    presentation_descriptor->setNamespace(1);
+    presentation_descriptor->setUnit(0x2700); // unitless
+    presentation_descriptor->setDescription(0);
+    characteristic->addDescriptor(presentation_descriptor);
+
+    return characteristic;
 }
