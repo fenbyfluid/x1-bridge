@@ -5,6 +5,12 @@
 
 #include <Arduino.h>
 
+#if defined LED_BUILTIN
+void setupLed() {
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, HIGH);
+}
+
 void startLedBlinkTask() {
     xTaskCreateUniversal([](void *pvParameters) {
         for (;;) {
@@ -32,9 +38,50 @@ void startLedBlinkTask() {
         }
     }, "ledBlink", getArduinoLoopTaskStackSize(), NULL, 1, NULL, ARDUINO_RUNNING_CORE);
 }
+#elif defined LED_RGB
+#include <FastLED.h>
 
+CRGB rgb_led = {};
+
+void setupLed() {
+    FastLED.addLeds<WS2812, LED_RGB, GRB>(&rgb_led, 1);
+    FastLED.showColor(CRGB::Green, 0xFF);
+}
+
+void startLedBlinkTask() {
+    xTaskCreateUniversal([](void *pvParameters) {
+        for (;;) {
+            FastLED.showColor(CRGB::Green, 0xFF);
+
+            delay(100);
+
+            FastLED.showColor(CRGB::Black, 0x00);
+
+            if (!Ble::isClientConnected()) {
+                delay(2 * 1000);
+
+                continue;
+            }
+
+            delay(150);
+
+            FastLED.showColor(CRGB::Green, 0xFF);
+
+            delay(100);
+
+            FastLED.showColor(CRGB::Black, 0x00);
+
+            delay(750);
+        }
+    }, "ledBlink", getArduinoLoopTaskStackSize(), NULL, 1, NULL, ARDUINO_RUNNING_CORE);
+}
+#else
+#warning "LED support unavailable"
+#endif
+
+#ifdef BATTERY_MONITOR
 void checkBatteryLevel() {
-    uint32_t millivolts = analogReadMilliVolts(A13) * 2;
+    uint32_t millivolts = analogReadMilliVolts(BATTERY_MONITOR) * 2;
 
     // 4234 (mostly 4232) appears to be our actual max
     // 3218 seems to be the minimum seen when re-connecting usb after death
@@ -69,6 +116,7 @@ void startBatteryMonitorTask() {
         }
     }, "batteryMonitor", getArduinoLoopTaskStackSize(), NULL, 1, NULL, ARDUINO_RUNNING_CORE);
 }
+#endif
 
 void setup() {
     Log::print("hello, world\n");
@@ -77,14 +125,18 @@ void setup() {
     vTaskPrioritySet(nullptr, 10);
 
     // Turn the LED on immediately so we know we're on.
-    pinMode(LED_BUILTIN, OUTPUT);
-    digitalWrite(LED_BUILTIN, HIGH);
+    setupLed();
     delay(50);
 
+#ifdef BATTERY_MONITOR
     // Run immediately so that we skip startup if the voltage is too low.
     checkBatteryLevel();
 
     startBatteryMonitorTask();
+#else
+    #warning "Battery monitor unavailable"
+    Log::print("battery monitor unavailable\n");
+#endif
 
     startLedBlinkTask();
 
@@ -96,8 +148,10 @@ void setup() {
     Ble::init(name, pin_code);
     Bluetooth::init(name);
 
+#ifdef BATTERY_MONITOR
     // Run battery monitor again now BLE is up to populate the battery level characteristic.
     checkBatteryLevel();
+#endif
 
     Log::print("ready\n");
 }
