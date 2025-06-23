@@ -55,6 +55,7 @@ static BLECharacteristic *battery_level = nullptr;
 
 // Bridge Service
 static BLECharacteristic *battery_voltage = nullptr;
+static BLECharacteristic *debug_log = nullptr;
 
 // TODO: There is a fair amount of complexity around supporting multiple connections.
 //       We don't currently need that, but it does need validating that we're being sane.
@@ -226,12 +227,23 @@ void Ble::init(const std::string &name, uint32_t pin_code) {
     initBridgeService(server);
     initBatteryService(server);
 
+    Log::setOutputCallback([=](const std::string &message) {
+        if (debug_log) {
+            debug_log->setValue(message);
+            debug_log->notify();
+        }
+    });
+
     BLEAdvertising *advertising = BLEDevice::getAdvertising();
     advertising->addServiceUUID(X1_GATT_UUID_BRIDGE_SVC);
     advertising->start();
 }
 
 void Ble::deinit() {
+    battery_level = nullptr;
+    battery_voltage = nullptr;
+    debug_log = nullptr;
+
     BLEDevice::deinit();
 }
 
@@ -281,7 +293,7 @@ void Ble::initBridgeService(BLEServer *server) {
     createConfigConnectedIdleTimeoutCharacteristic(service);
     createConfigDisconnectedIdleTimeoutCharacteristic(service);
     battery_voltage = createBatteryVoltageCharacteristic(service);
-    createDebugLogCharacteristic(service);
+    debug_log = createDebugLogCharacteristic(service);
     createRestartCharacteristic(service);
     createSleepCharacteristic(service);
     createOtaUpdateCharacteristic(service);
@@ -857,11 +869,6 @@ BLECharacteristic *Ble::createDebugLogCharacteristic(BLEService *service) {
     configuration_descriptor->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE_ENC_MITM);
     client_config_descriptors.push_back(configuration_descriptor);
     characteristic->addDescriptor(configuration_descriptor);
-
-    Log::setOutputCallback([=](const std::string &message) {
-        characteristic->setValue(message);
-        characteristic->notify();
-    });
 
     return characteristic;
 }
